@@ -70,17 +70,13 @@ jobs:
         shell: bash
         run: grep -E '^[A-Z_]+=' scripts/versions.env >> "$GITHUB_OUTPUT"
       - name: Build the mod
+        id: build
         uses: geode-sdk/build-geode-mod@main
         with:
-          sdk: given          # the Geode version pinned in mod.json (5.11.2)
+          sdk: given
           target: Win64
-          combine: true
-          # bindings@main also tracks GD 2.209+; use the verified commit.
           bindings: geode-sdk/bindings
           bindings-ref: ${{ steps.pins.outputs.BINDINGS_REF }}
-      - name: Combine
-        uses: geode-sdk/build-geode-mod/combine@main
-        id: build
       - uses: actions/upload-artifact@v4
         with:
           name: Frame Window Lab (.geode)
