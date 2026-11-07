@@ -4,6 +4,8 @@
 #include "../Settings.hpp"
 #include "../Sounds.hpp"
 
+#include <Geode/binding/ButtonSprite.hpp>
+#include <Geode/binding/PlayerObject.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/CCMouseDispatcher.hpp>
 
@@ -13,35 +15,64 @@ namespace fwl::gd {
 
 namespace {
 constexpr int kTouchPriority = -600; // ahead of GD's UILayer (click = jump) and menus
-constexpr float kMargin = 6.f;
-constexpr float kButtonRow = 15.f;
+constexpr float kSide = 6.f;          // panel side margin
+constexpr float kBottom = 4.f;        // panel bottom margin
 
 ccColor4F col(ccColor4B c, float a = 1.f) { return cfg::toF(c, a); }
 ccColor4F rgba4(float r, float g, float b, float a) { return {r, g, b, a}; }
+ccColor4F rgb255(int r, int g, int b, float a = 1.f) { return {r / 255.f, g / 255.f, b / 255.f, a}; }
 std::string sgn(Tick t) { return (t > 0 ? "+" : "") + std::to_string(t); }
 
-char const* modeName(Mode m) {
-    switch (m) {
-        case Mode::Idle: return "IDLE";
-        case Mode::Recording: return "REC";
-        case Mode::Playback: return "REPLAY";
-        case Mode::Testing: return "TEST";
-    }
-    return "?";
+// NaN's look: white minor ticks every 10 frames, yellow labelled ticks every 60.
+constexpr Tick kMinor[] = {1, 5, 10, 30, 60, 120, 300, 600, 1200, 3000, 6000, 12000, 30000};
+constexpr Tick kMajor[] = {5, 10, 30, 60, 120, 300, 600, 1200, 3000, 6000, 12000, 30000, 60000};
+
+Tick pick(Tick const* steps, std::size_t n, double pxPerTick, float minPx, Tick multipleOf = 1) {
+    for (std::size_t i = 0; i < n; ++i)
+        if (steps[i] * pxPerTick >= minPx && steps[i] % multipleOf == 0) return steps[i];
+    return steps[n - 1];
 }
 
 constexpr RGBA kPalette[] = {
     {80, 255, 120, 255}, {255, 70, 80, 255}, {255, 210, 40, 255},
     {60, 220, 255, 255}, {255, 90, 230, 255}, {255, 255, 255, 255},
 };
+
+char const* buttonWord(Button b) {
+    switch (b) {
+        case Button::Jump: return "Jump";
+        case Button::Left: return "Left";
+        case Button::Right: return "Right";
+    }
+    return "?";
+}
+
+// Frame-window size shown on an indicator: the passing run that contains the
+// recorded timing (0 if the recorded timing itself fails).
+struct WindowCount {
+    Tick count = 0;
+    bool exact = true;
+    bool measured = false;
+};
+WindowCount windowCount(MeasurementSet const& ms) {
+    auto rep = ms.report();
+    WindowCount w;
+    w.measured = !rep.results.empty();
+    if (rep.originalSegment) {
+        auto const& seg = rep.segments[*rep.originalSegment];
+        w.count = seg.range.size();
+        w.exact = seg.exact();
+    }
+    return w;
+}
 } // namespace
 
 Overlay* Overlay::s_instance = nullptr;
 
-// ============================================================ CircleLayer
+// ============================================================ LevelLayer
 
-CircleLayer* CircleLayer::create() {
-    auto ret = new CircleLayer();
+LevelLayer* LevelLayer::create() {
+    auto ret = new LevelLayer();
     if (ret->init()) {
         ret->autorelease();
         return ret;
@@ -50,50 +81,117 @@ CircleLayer* CircleLayer::create() {
     return nullptr;
 }
 
-bool CircleLayer::init() {
+bool LevelLayer::init() {
     if (!CCNode::init()) return false;
+    m_path = CCDrawNode::create();
+    m_path->setBlendFunc({GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA});
+    addChild(m_path, 0);
     m_draw = CCDrawNode::create();
     m_draw->setBlendFunc({GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA});
-    addChild(m_draw);
+    addChild(m_draw, 1);
     return true;
 }
 
-void CircleLayer::redraw() {
+CCLabelBMFont* LevelLayer::label(std::size_t i) {
+    while (m_labels.size() <= i) {
+        auto l = CCLabelBMFont::create("", "bigFont.fnt");
+        l->setScale(0.42f);
+        l->setAnchorPoint({1.f, 0.5f});
+        addChild(l, 3);
+        m_labels.push_back(l);
+    }
+    m_labels[i]->setVisible(true);
+    return m_labels[i];
+}
+
+void LevelLayer::redraw() {
+    drawPath();
+    drawIndicators();
+}
+
+void LevelLayer::drawPath() {
+    auto& s = Session::get();
+    bool show = cfg::flag("show-path");
+    if (!show) {
+        if (m_pathDrawn) m_path->clear();
+        m_pathDrawn = 0;
+        m_pathVersion = -1;
+        return;
+    }
+    if (m_pathVersion != s.pathVersion || m_pathDrawn > s.path.size()) {
+        m_path->clear();
+        m_pathDrawn = 0;
+        m_pathVersion = s.pathVersion;
+    }
+    auto c = col(cfg::rgba("color-path"));
+    auto const& p = s.path;
+    for (std::size_t i = std::max<std::size_t>(m_pathDrawn, 1); i < p.size(); ++i)
+        m_path->drawSegment({p[i - 1].first, p[i - 1].second}, {p[i].first, p[i].second}, 0.45f, c);
+    m_pathDrawn = p.size();
+}
+
+void LevelLayer::drawIndicators() {
     auto& s = Session::get();
     m_draw->clear();
     std::size_t li = 0;
+    auto none = rgba4(0, 0, 0, 0);
+
+    // small hollow circles where each input fires, on the path
+    if (cfg::flag("show-path")) {
+        auto pc = col(cfg::rgba("color-path"));
+        for (auto const& e : s.project.sequence.events()) {
+            auto it = s.inputPos.find(e.id);
+            if (it == s.inputPos.end()) continue;
+            bool sel = s.selected && *s.selected == e.id;
+            m_draw->drawCircle({it->second.first, it->second.second}, sel ? 3.2f : 2.4f, none, sel ? 0.7f : 0.45f,
+                               sel ? rgba4(1, 1, 1, 1) : pc, 16);
+        }
+    }
+
+    // circle indicators: a white/black target at the input with its window size
+    if (cfg::flag("show-indicators")) {
+        for (auto const& [id, ms] : s.project.measurements) {
+            auto ev = s.project.sequence.find(id);
+            if (!ev) continue;
+            std::optional<Pos> pos;
+            if (auto it = ms.positions.find(ms.anchor); it != ms.positions.end()) pos = it->second;
+            else if (auto it2 = s.inputPos.find(id); it2 != s.inputPos.end()) pos = it2->second;
+            if (!pos) continue;
+            auto w = windowCount(ms);
+            if (!w.measured) continue;
+            bool stale = s.measurementStale(id);
+            bool sel = s.selected && *s.selected == id;
+            float a = stale ? 0.45f : 1.f;
+            CCPoint c{pos->first, pos->second};
+            float r = static_cast<float>(cfg::real("indicator-radius"));
+            m_draw->drawCircle(c, r, none, r * 0.2f, rgba4(1, 1, 1, a), 40);
+            m_draw->drawCircle(c, r * 0.62f, none, r * 0.14f, rgba4(0, 0, 0, a * 0.9f), 32);
+            m_draw->drawCircle(c, r * 0.18f, rgba4(1, 1, 1, a), 0, none, 12);
+            if (w.count == 0) m_draw->drawCircle(c, r * 1.25f, none, 0.6f, rgba4(1, 0.25f, 0.25f, a), 40);
+            if (sel) m_draw->drawCircle(c, r * 1.35f, none, 0.6f, rgba4(1, 0.85f, 0.2f, 1), 40);
+            auto l = label(li++);
+            l->setString(fmt::format("{}{}", w.count, w.exact ? "" : "+").c_str());
+            l->setPosition({c.x - r * 1.25f, c.y});
+            l->setOpacity(static_cast<GLubyte>(255 * a));
+            l->setColor(w.count == 0 ? ccColor3B{255, 90, 90} : ccColor3B{255, 255, 255});
+        }
+    }
+    for (std::size_t i = li; i < m_labels.size(); ++i) m_labels[i]->setVisible(false);
+
+    // the user's own circles
     for (auto const& c : s.project.circles.circles()) {
         if (!c.visible) continue;
         bool sel = s.selectedCircle && *s.selectedCircle == c.id;
-        bool linkedToSel = s.selected && c.linkedInput && *c.linkedInput == *s.selected;
         auto line = cfg::toF(c.color);
         auto fill = cfg::toF(c.color, c.fillAlpha);
-        if (c.glow) { // soft halo: two wider, faint rings
-            m_draw->drawCircle({c.x, c.y}, c.radius + c.thickness * 1.5f, rgba4(0, 0, 0, 0), c.thickness * 2.0f,
+        if (c.glow) {
+            m_draw->drawCircle({c.x, c.y}, c.radius + c.thickness * 1.5f, none, c.thickness * 2.0f,
                                cfg::toF(c.color, 0.18f), 48);
-            m_draw->drawCircle({c.x, c.y}, c.radius + c.thickness * 0.8f, rgba4(0, 0, 0, 0), c.thickness * 1.2f,
-                               cfg::toF(c.color, 0.35f), 48);
         }
         m_draw->drawCircle({c.x, c.y}, c.radius, fill, c.thickness, line, 48);
-        if (sel || linkedToSel) {
-            m_draw->drawCircle({c.x, c.y}, c.radius + c.thickness + 2.f, rgba4(0, 0, 0, 0), 0.6f,
-                               sel ? rgba4(1, 1, 1, 0.95f) : rgba4(1, 1, 1, 0.45f), 48);
-        }
-        if (!c.label.empty()) {
-            if (li >= m_labels.size()) {
-                auto l = CCLabelBMFont::create("", "chatFont.fnt");
-                l->setScale(0.32f);
-                addChild(l, 2);
-                m_labels.push_back(l);
-            }
-            auto l = m_labels[li++];
-            l->setString(c.label.c_str());
-            l->setPosition({c.x, c.y + c.radius + 5.f});
-            l->setColor({c.color.r, c.color.g, c.color.b});
-            l->setVisible(true);
-        }
+        if (sel)
+            m_draw->drawCircle({c.x, c.y}, c.radius + c.thickness + 2.f, none, 0.6f, rgba4(1, 1, 1, 0.95f), 48);
     }
-    for (; li < m_labels.size(); ++li) m_labels[li]->setVisible(false);
 }
 
 // ============================================================ Overlay
@@ -108,6 +206,17 @@ void Overlay::install(PlayLayer* pl) {
     }
 }
 
+void Overlay::addButton(char const* key, char const* text, char const* bg, ccColor3B textColor, SEL_MenuHandler fn,
+                        bool right) {
+    auto spr = ButtonSprite::create(text, 22, true, "bigFont.fnt", bg, 26.f, 0.55f);
+    if (spr->m_label) spr->m_label->setColor(textColor);
+    spr->setScale(0.5f);
+    auto item = CCMenuItemSpriteExtra::create(spr, this, fn);
+    item->setID(key);
+    m_menu->addChild(item);
+    (right ? m_right : m_left).emplace_back(key, item);
+}
+
 bool Overlay::init(PlayLayer* pl) {
     if (!CCLayer::init()) return false;
     m_pl = pl;
@@ -117,48 +226,39 @@ bool Overlay::init(PlayLayer* pl) {
     m_draw->setBlendFunc({GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA});
     addChild(m_draw);
 
-    m_info = CCLabelBMFont::create("", "chatFont.fnt");
-    m_info->setAnchorPoint({0, 0});
-    m_info->setScale(0.42f);
-    addChild(m_info, 2);
-
-    m_status = CCLabelBMFont::create("", "chatFont.fnt");
-    m_status->setAnchorPoint({0, 0});
-    m_status->setScale(0.42f);
-    addChild(m_status, 2);
-
-    m_tooltip = CCLabelBMFont::create("", "chatFont.fnt");
-    m_tooltip->setAnchorPoint({0.5f, 0});
-    m_tooltip->setScale(0.38f);
-    addChild(m_tooltip, 3);
+    auto mk = [&](float scale, CCPoint anchor, int z = 2) {
+        auto l = CCLabelBMFont::create("", "chatFont.fnt");
+        l->setScale(scale);
+        l->setAnchorPoint(anchor);
+        addChild(l, z);
+        return l;
+    };
+    m_hud = mk(0.5f, {0, 1});
+    m_status = mk(0.38f, {0, 1});
+    m_window = mk(0.38f, {1, 1});
+    m_tooltip = mk(0.4f, {0.5f, 0}, 5);
+    m_resetLabel = mk(0.28f, {0, 0.5f});
+    m_goalLabel = mk(0.28f, {0, 0.5f});
 
     m_menu = CCMenu::create();
     m_menu->setPosition({0, 0});
-    addChild(m_menu, 2);
-    struct B { char const* key; char const* text; SEL_MenuHandler fn; };
-    B defs[] = {
-        {"rec", "REC", menu_selector(Overlay::onRec)},       {"play", "PLAY", menu_selector(Overlay::onPlay)},
-        {"pause", "PAUSE", menu_selector(Overlay::onPause)}, {"back", "<", menu_selector(Overlay::onStepBack)},
-        {"step", ">", menu_selector(Overlay::onStep)},       {"test", "TEST", menu_selector(Overlay::onTest)},
-        {"sweep", "SWEEP", menu_selector(Overlay::onSweep)}, {"stop", "STOP", menu_selector(Overlay::onStop)},
-        {"mode", "1", menu_selector(Overlay::onMode)},       {"circle", "O", menu_selector(Overlay::onCircleTool)},
-        {"undo", "UNDO", menu_selector(Overlay::onUndo)},    {"redo", "REDO", menu_selector(Overlay::onRedo)},
-        {"save", "SAVE", menu_selector(Overlay::onSave)},    {"load", "LOAD", menu_selector(Overlay::onLoad)},
-        {"hb", "HB", menu_selector(Overlay::onHitboxes)},
-    };
-    for (auto const& d : defs) {
-        auto spr = ButtonSprite::create(d.text, "bigFont.fnt", "GJ_button_04.png", 0.6f);
-        spr->setScale(0.42f);
-        auto item = CCMenuItemSpriteExtra::create(spr, this, d.fn);
-        item->setID(d.key);
-        m_menu->addChild(item);
-        m_buttons[d.key] = item;
-    }
+    addChild(m_menu, 3);
+    ccColor3B white{255, 255, 255}, yellow{255, 230, 60}, orange{255, 170, 40};
+    addButton("ci", "CI", "GJ_button_02.png", white, menu_selector(Overlay::onCI), false);
+    addButton("rec", "R", "GJ_button_01.png", orange, menu_selector(Overlay::onRec), false);
+    addButton("hb", "H", "GJ_button_01.png", yellow, menu_selector(Overlay::onHitboxes), false);
+    addButton("circle", "O", "GJ_button_01.png", yellow, menu_selector(Overlay::onCircleTool), false);
+    addButton("play", "P", "GJ_button_02.png", white, menu_selector(Overlay::onPlay), true);
+    addButton("back", "<", "GJ_button_01.png", yellow, menu_selector(Overlay::onStepBack), true);
+    addButton("step", ">", "GJ_button_01.png", yellow, menu_selector(Overlay::onStep), true);
+    addButton("add", "+", "GJ_button_01.png", yellow, menu_selector(Overlay::onAdd), true);
+    addButton("test", "T", "GJ_button_01.png", yellow, menu_selector(Overlay::onTest), true);
+    addButton("analyze", "A", "GJ_button_01.png", yellow, menu_selector(Overlay::onAnalyze), true);
 
-    m_circles = CircleLayer::create();
-    if (pl->m_objectLayer) pl->m_objectLayer->addChild(m_circles, 9999);
+    m_level = LevelLayer::create();
+    if (pl->m_objectLayer) pl->m_objectLayer->addChild(m_level, 9999);
 
-    m_view.pxPerTick = 6;
+    m_view.pxPerTick = cfg::real("timeline-zoom");
     layout();
     setTouchEnabled(true);
     scheduleUpdate();
@@ -180,36 +280,46 @@ void Overlay::registerWithTouchDispatcher() {
     CCTouchDispatcher::get()->addTargetedDelegate(this, kTouchPriority, true);
 }
 
-CCRect Overlay::stripRect() const {
+CCRect Overlay::panelRect() const {
     auto win = CCDirector::get()->getWinSize();
     float h = static_cast<float>(cfg::real("timeline-height"));
-    return {kMargin, kMargin, win.width - 2 * kMargin, h};
+    return {kSide, kBottom, win.width - 2 * kSide, h};
+}
+
+float Overlay::baselineY() const {
+    auto r = panelRect();
+    return r.getMinY() + r.size.height * 0.3f;
 }
 
 void Overlay::layout() {
-    auto r = stripRect();
+    auto r = panelRect();
     m_view.width = r.size.width;
-    float x = r.getMaxX();
-    float y = r.getMaxY() + kButtonRow * 0.5f + 2.f;
-    // right-aligned compact button row above the strip
-    auto children = m_menu->getChildren();
-    for (int i = static_cast<int>(children->count()) - 1; i >= 0; --i) {
-        auto item = static_cast<CCNode*>(children->objectAtIndex(i));
+    float y = r.getMaxY() + 8.f;
+    float x = r.getMinX() + 2.f;
+    for (auto& [k, item] : m_left) {
         float w = item->getScaledContentSize().width;
-        item->setPosition({x - w * 0.5f, y});
-        x -= w + 2.f;
+        item->setPosition({x + w * 0.5f, y});
+        x += w + 3.f;
     }
-    m_info->setPosition({r.getMinX(), r.getMaxY() + 2.f});
-    m_status->setPosition({r.getMinX(), r.getMaxY() + kButtonRow + 4.f});
+    x = r.getMaxX() - 2.f;
+    for (auto it = m_right.rbegin(); it != m_right.rend(); ++it) {
+        float w = it->second->getScaledContentSize().width;
+        it->second->setPosition({x - w * 0.5f, y});
+        x -= w + 3.f;
+    }
+    auto win = CCDirector::get()->getWinSize();
+    m_hud->setPosition({4.f, win.height - 14.f});
+    m_status->setPosition({4.f, win.height - 25.f});
+    m_window->setPosition({win.width - 4.f, r.getMaxY() + 30.f});
 }
 
-bool Overlay::overStrip(CCPoint p) const { return stripRect().containsPoint(p); }
+bool Overlay::overPanel(CCPoint p) const { return panelRect().containsPoint(p); }
 
 bool Overlay::overButtons(CCPoint p) {
-    for (auto const& [k, item] : m_buttons) {
-        auto box = item->boundingBox();
-        if (box.containsPoint(m_menu->convertToNodeSpace(convertToWorldSpace(p)))) return true;
-    }
+    auto mp = m_menu->convertToNodeSpace(convertToWorldSpace(p));
+    for (auto* list : {&m_left, &m_right})
+        for (auto& [k, item] : *list)
+            if (item->isVisible() && item->boundingBox().containsPoint(mp)) return true;
     return false;
 }
 
@@ -217,12 +327,15 @@ CCPoint Overlay::toWorld(CCTouch* t) const {
     return m_pl->m_objectLayer->convertToNodeSpace(t->getLocation());
 }
 
-std::optional<std::uint64_t> Overlay::markerAt(float localX) const {
+std::optional<std::uint64_t> Overlay::markerAt(CCPoint p) const {
     auto& s = Session::get();
+    auto r = panelRect();
+    float lx = p.x - r.getMinX();
+    float tol = std::max(4.f, static_cast<float>(m_view.pxPerTick) * 0.6f);
     std::optional<std::uint64_t> best;
-    float bestD = 5.f;
+    float bestD = tol;
     for (auto const& e : s.project.sequence.events()) {
-        float d = std::abs(m_view.tickToX(static_cast<double>(e.tick)) - localX);
+        float d = std::abs(m_view.tickToX(static_cast<double>(e.tick)) - lx);
         bool prefer = s.selected && *s.selected == e.id; // keep grabbing the selected one when overlapping
         if (d < bestD || (prefer && d <= bestD)) {
             bestD = d;
@@ -232,180 +345,260 @@ std::optional<std::uint64_t> Overlay::markerAt(float localX) const {
     return best;
 }
 
-CCLabelBMFont* Overlay::tickLabel(std::size_t i) {
-    while (m_tickLabels.size() <= i) {
+CCLabelBMFont* Overlay::pooled(std::vector<CCLabelBMFont*>& pool, std::size_t i, float scale, CCPoint anchor) {
+    while (pool.size() <= i) {
         auto l = CCLabelBMFont::create("", "chatFont.fnt");
-        l->setScale(0.3f);
-        l->setAnchorPoint({0.5f, 1.f});
+        l->setScale(scale);
+        l->setAnchorPoint(anchor);
         addChild(l, 1);
-        m_tickLabels.push_back(l);
+        pool.push_back(l);
     }
-    return m_tickLabels[i];
+    pool[i]->setVisible(true);
+    return pool[i];
+}
+
+void Overlay::fitAll() {
+    auto& s = Session::get();
+    Tick last = std::max<Tick>({s.project.sequence.lastTick(), s.runEndTick, 240});
+    m_view.pxPerTick = std::clamp(m_view.width / static_cast<double>(last + 120), 0.08, 2.0);
+    m_view.startTick = -40 / m_view.pxPerTick * 0.5;
+    m_userView = true;
+}
+
+bool Overlay::editKeysActive() const {
+    auto& s = Session::get();
+    return (m_focus || s.paused) && s.mode != Mode::Recording && s.mode != Mode::Testing;
 }
 
 void Overlay::update(float) {
     auto& s = Session::get();
     setVisible(s.overlayVisible);
-    m_circles->setVisible(s.overlayVisible);
+    m_level->setVisible(s.overlayVisible);
     if (!s.overlayVisible) return;
-    if (s.followPlayhead && m_drag == Drag::None) m_view.ensureVisible(s.tick());
+    layout();
+    if (!m_fitted && !s.project.sequence.empty()) {
+        fitAll();
+        m_userView = false;
+        m_fitted = true;
+    }
+    Tick t = s.tick();
+    bool running = !s.paused && (s.mode == Mode::Recording || s.mode == Mode::Playback || s.mode == Mode::Idle);
+    if (s.mode == Mode::Testing) {
+        if (s.selected)
+            if (auto e = s.project.sequence.find(*s.selected)) m_view.ensureVisible(e->tick, m_view.width * 0.3f);
+    } else if (!m_userView || (running && s.mode != Mode::Idle)) {
+        if (t != m_lastTick) m_view.ensureVisible(t, m_view.width * 0.2f);
+        if (running && s.mode != Mode::Idle) m_userView = false;
+    }
+    m_lastTick = t;
     redraw();
-    m_circles->redraw();
+    m_level->redraw();
     updateLabels();
     updateButtons();
 }
 
 void Overlay::redraw() {
     auto& s = Session::get();
-    auto r = stripRect();
+    auto r = panelRect();
     m_view.width = r.size.width;
     m_draw->clear();
 
     float x0 = r.getMinX(), y0 = r.getMinY(), w = r.size.width, h = r.size.height;
-    float labelH = h * 0.2f, resultH = h * 0.16f;
-    float markTop = y0 + h - labelH - resultH;
+    float base = baselineY();
+    float top = y0 + h;
     auto X = [&](double t) { return x0 + m_view.tickToX(t); };
     auto inside = [&](float x) { return x >= x0 - 0.5f && x <= x0 + w + 0.5f; };
 
-    // background
-    m_draw->drawRect({x0, y0}, {x0 + w, y0 + h}, rgba4(0, 0, 0, static_cast<float>(cfg::real("timeline-opacity"))), 0.5f,
-                     rgba4(1, 1, 1, 0.25f));
+    // translucent panel
+    m_draw->drawRect({x0, y0}, {x0 + w, top}, rgba4(0, 0, 0, static_cast<float>(cfg::real("timeline-opacity"))), 0,
+                     rgba4(0, 0, 0, 0));
 
-    // grid
+    // measured window of the selected input (behind the grid)
+    if (auto ms = s.selectedMeasurement()) {
+        bool stale = s.measurementStale(*s.selected);
+        float a = stale ? 0.35f : 1.f;
+        auto pass = col(cfg::rgba("color-pass"), a);
+        auto fail = col(cfg::rgba("color-fail"), a);
+        float by0 = top - h * 0.1f, by1 = top - 1.f;
+        for (auto const& [t, out] : ms->byTick) {
+            float a0 = X(static_cast<double>(t) - 0.5), a1 = X(static_cast<double>(t) + 0.5);
+            if (a1 < x0 || a0 > x0 + w) continue;
+            a0 = std::max(a0, x0);
+            a1 = std::min(a1, x0 + w);
+            auto c = out == Outcome::Pass ? pass : out == Outcome::Fail ? fail : rgba4(0.6f, 0.6f, 0.6f, 0.5f * a);
+            if (out == Outcome::Blocked) c = rgba4(0.25f, 0.25f, 0.25f, 0.6f * a);
+            m_draw->drawRect({a0, by0}, {std::max(a1, a0 + 0.6f), by1}, c, 0, c);
+        }
+        auto rep = ms->report();
+        for (auto const& seg : rep.segments) {
+            float a0 = X(static_cast<double>(ms->anchor + seg.range.lo) - 0.5);
+            float a1 = X(static_cast<double>(ms->anchor + seg.range.hi) + 0.5);
+            if (a1 < x0 || a0 > x0 + w) continue;
+            m_draw->drawRect({std::max(a0, x0), base}, {std::min(a1, x0 + w), by0}, col(cfg::rgba("color-pass"), 0.13f * a),
+                             0, rgba4(0, 0, 0, 0));
+        }
+    }
+
+    // grid: white minor ticks, yellow labelled major ticks
+    Tick minor = pick(kMinor, std::size(kMinor), m_view.pxPerTick, 4.5f);
+    Tick major = pick(kMajor, std::size(kMajor), m_view.pxPerTick, 34.f, minor);
     Tick first = static_cast<Tick>(std::floor(m_view.startTick));
     Tick last = static_cast<Tick>(std::ceil(m_view.startTick + m_view.visibleTicks()));
-    Tick g = m_view.gridStep(5.f), L = m_view.labelStep(48.f);
+    float minorTop = base + (top - base) * 0.45f, majorTop = base + (top - base) * 0.66f;
     std::size_t li = 0;
-    for (Tick t = (first / g) * g; t <= last; t += g) {
-        if (t < 0) continue;
+    for (Tick t = std::max<Tick>(0, (first / minor) * minor); t <= last; t += minor) {
         float x = X(static_cast<double>(t));
         if (!inside(x)) continue;
-        bool major = t % L == 0;
-        m_draw->drawSegment({x, y0}, {x, markTop}, major ? 0.35f : 0.2f, rgba4(1, 1, 1, major ? 0.45f : 0.18f));
-        if (major) {
-            auto lab = tickLabel(li++);
+        bool isMajor = t % major == 0;
+        if (isMajor) {
+            m_draw->drawSegment({x, base}, {x, majorTop}, 0.45f, rgb255(255, 215, 40));
+            auto lab = pooled(m_tickLabels, li++, 0.33f, {0.5f, 1.f});
             lab->setString(std::to_string(t).c_str());
-            lab->setPosition({x, y0 + h - 1.f});
-            lab->setVisible(true);
+            lab->setPosition({x, base - 1.5f});
+            lab->setColor({200, 200, 200});
+        } else {
+            m_draw->drawSegment({x, base}, {x, minorTop}, 0.32f, rgba4(1, 1, 1, 0.9f));
         }
     }
     for (; li < m_tickLabels.size(); ++li) m_tickLabels[li]->setVisible(false);
+    m_draw->drawSegment({x0, base}, {x0 + w, base}, 0.45f, rgba4(1, 1, 1, 1));
 
-    // measured results band for the selected input
-    if (auto ms = s.selectedMeasurement()) {
-        bool stale = s.measurementStale(*s.selected);
-        auto pass = col(cfg::rgba("color-pass"), stale ? 0.35f : 1.f);
-        auto fail = col(cfg::rgba("color-fail"), stale ? 0.35f : 1.f);
-        auto grey = rgba4(0.6f, 0.6f, 0.6f, stale ? 0.2f : 0.5f);
-        float ry0 = markTop, ry1 = markTop + resultH;
-        for (auto const& [t, out] : ms->byTick) {
-            float a = X(static_cast<double>(t) - 0.5), b = X(static_cast<double>(t) + 0.5);
-            if (b < x0 || a > x0 + w) continue;
-            a = std::max(a, x0);
-            b = std::min(b, x0 + w);
-            auto c = out == Outcome::Pass ? pass : out == Outcome::Fail ? fail : grey;
-            if (out == Outcome::Blocked) c = rgba4(0.2f, 0.2f, 0.2f, 0.5f);
-            m_draw->drawRect({a, ry0}, {b, ry1}, c, 0, c);
+    // reset marker (blue) and goal marker
+    if (s.resetTick >= 0) {
+        float x = X(static_cast<double>(s.resetTick));
+        if (inside(x)) {
+            m_draw->drawRect({x - 1.6f, base - 3.f}, {x + 1.6f, top - 2.f}, rgb255(40, 110, 255, 0.95f), 0,
+                             rgba4(0, 0, 0, 0));
+            m_resetLabel->setString(fmt::format("Reset @ {}", s.resetTick).c_str());
+            m_resetLabel->setPosition({x + 3.f, majorTop + 2.f});
+            m_resetLabel->setVisible(true);
+        } else {
+            m_resetLabel->setVisible(false);
         }
-        // highlight each passing window segment
-        auto rep = ms->report();
-        for (auto const& seg : rep.segments) {
-            float a = X(static_cast<double>(ms->anchor + seg.range.lo) - 0.5);
-            float b = X(static_cast<double>(ms->anchor + seg.range.hi) + 0.5);
-            if (b < x0 || a > x0 + w) continue;
-            m_draw->drawRect({std::max(a, x0), y0}, {std::min(b, x0 + w), ry1}, col(cfg::rgba("color-pass"), 0.08f),
-                             0.6f, col(cfg::rgba("color-pass"), seg.exact() ? 0.9f : 0.4f));
-        }
-        float ax = X(static_cast<double>(ms->anchor));
-        if (inside(ax)) m_draw->drawSegment({ax, ry0}, {ax, ry1}, 0.6f, rgba4(1, 0.85f, 0.2f, 1));
+    } else {
+        m_resetLabel->setVisible(false);
     }
-
-    // goal marker
     auto goal = s.effectiveGoal();
-    if (goal.kind == Goal::Kind::SurviveUntilTick) {
+    m_goalLabel->setVisible(false);
+    if (goal.kind == Goal::Kind::SurviveUntilTick && (s.selected || s.project.hasGoal)) {
         float gx = X(static_cast<double>(goal.tick));
-        if (inside(gx))
-            m_draw->drawSegment({gx, y0}, {gx, markTop}, s.project.hasGoal ? 0.7f : 0.4f,
-                                col(cfg::rgba("color-goal"), s.project.hasGoal ? 1.f : 0.5f));
+        if (inside(gx)) {
+            auto gc = col(cfg::rgba("color-goal"), s.project.hasGoal ? 1.f : 0.55f);
+            for (float y = base; y < top - 2.f; y += 3.f) m_draw->drawSegment({gx, y}, {gx, std::min(y + 1.6f, top - 2.f)}, 0.4f, gc);
+            m_goalLabel->setString(s.project.hasGoal ? "goal" : "goal (auto)");
+            m_goalLabel->setPosition({gx + 2.f, top - 5.f});
+            m_goalLabel->setVisible(true);
+        }
     }
 
-    // input markers: presses tall, releases short, so they never hide each other
-    auto press = col(cfg::rgba("color-press")), release = col(cfg::rgba("color-release"));
-    for (auto const& e : s.project.sequence.events()) {
+    // inputs: green press / red release boxes on the baseline, numbered below
+    auto press = col(cfg::rgba("color-press"), 0.85f), release = col(cfg::rgba("color-release"), 0.85f);
+    float bw = std::clamp(static_cast<float>(m_view.pxPerTick) * 0.8f, 2.4f, 5.f);
+    float bh = (top - base) * 0.27f;
+    std::size_t ii = 0;
+    float lastLabelX = -1e9f;
+    auto const& evs = s.project.sequence.events();
+    for (std::size_t i = 0; i < evs.size(); ++i) {
+        auto const& e = evs[i];
         float x = X(static_cast<double>(e.tick));
         if (!inside(x)) continue;
         bool sel = s.selected && *s.selected == e.id;
-        float top = y0 + (markTop - y0) * (e.down ? 0.85f : 0.55f);
-        float bottom = y0 + (e.player2 ? (markTop - y0) * 0.1f : 0.f) + 1.f;
         auto c = e.down ? press : release;
-        if (sel) m_draw->drawSegment({x, bottom}, {x, top}, 2.2f, rgba4(1, 1, 1, 0.9f));
-        m_draw->drawSegment({x, bottom}, {x, top}, sel ? 1.4f : 0.8f, c);
-        if (sel) { // drag handle
-            m_draw->drawRect({x - 2.5f, top - 2.5f}, {x + 2.5f, top + 2.5f}, c, 0.5f, rgba4(1, 1, 1, 1));
+        float yb = base + (e.player2 ? bh + 1.f : 0.f);
+        m_draw->drawRect({x - bw * 0.5f, yb}, {x + bw * 0.5f, yb + bh}, c, sel ? 0.6f : 0.f,
+                         sel ? rgb255(255, 230, 60) : c);
+        if (e.button != Button::Jump) // platformer left/right: small arrow
+            m_draw->drawSegment({x, yb + bh + 1.f}, {x + (e.button == Button::Left ? -2.5f : 2.5f), yb + bh + 2.5f}, 0.35f, c);
+        if (x - lastLabelX > 9.f || sel) {
+            auto lab = pooled(m_indexLabels, ii++, 0.28f, {0.5f, 1.f});
+            lab->setString(std::to_string(i + 1).c_str());
+            lab->setPosition({x, base - 8.5f});
+            lab->setColor(sel ? ccColor3B{255, 230, 60} : ccColor3B{170, 170, 170});
+            lastLabelX = x;
         }
-        if (e.button != Button::Jump) // left/right (platformer) marked with a small arrow
-            m_draw->drawSegment({x, top}, {x + (e.button == Button::Left ? -3.f : 3.f), top - 2.f}, 0.4f, c);
+        // measured window size above the box
+        if (auto ms = s.measurementFor(e.id); ms && cfg::flag("show-indicators")) {
+            auto wc = windowCount(*ms);
+            if (wc.measured && m_view.pxPerTick > 0.25) {
+                auto lab = pooled(m_indexLabels, ii++, 0.3f, {0.5f, 0.f});
+                lab->setString(fmt::format("{}{}", wc.count, wc.exact ? "" : "+").c_str());
+                lab->setPosition({x, yb + bh + 0.5f});
+                lab->setColor(s.measurementStale(e.id) ? ccColor3B{140, 140, 140}
+                              : wc.count == 0              ? ccColor3B{255, 100, 100}
+                                                           : ccColor3B{255, 255, 255});
+            }
+        }
     }
+    for (; ii < m_indexLabels.size(); ++ii) m_indexLabels[ii]->setVisible(false);
 
-    // playhead
+    // current frame (cyan)
     float px = X(static_cast<double>(s.tick()));
-    if (inside(px)) {
-        auto ph = col(cfg::rgba("color-playhead"));
-        m_draw->drawSegment({px, y0}, {px, y0 + h}, 0.5f, ph);
-        CCPoint tri[3] = {{px - 3.f, y0 + h}, {px + 3.f, y0 + h}, {px, y0 + h - 4.f}};
-        m_draw->drawPolygon(tri, 3, ph, 0, ph);
+    if (inside(px))
+        m_draw->drawRect({px - 0.8f, base - 3.f}, {px + 0.8f, top - 1.f}, col(cfg::rgba("color-current-frame")), 0,
+                         rgba4(0, 0, 0, 0));
+    // scrub ghost
+    if (m_drag == Drag::Scrub) {
+        float gx = std::clamp(m_dragLastX + x0, x0, x0 + w);
+        m_draw->drawRect({gx - 0.6f, base - 3.f}, {gx + 0.6f, top - 1.f}, col(cfg::rgba("color-current-frame"), 0.5f), 0,
+                         rgba4(0, 0, 0, 0));
     }
-
-    // focus outline
-    if (m_focus) m_draw->drawRect({x0, y0}, {x0 + w, y0 + h}, rgba4(0, 0, 0, 0), 0.6f, rgba4(1, 1, 1, 0.6f));
+    if (m_focus) m_draw->drawRect({x0, y0}, {x0 + w, top}, rgba4(0, 0, 0, 0), 0.4f, rgba4(1, 1, 1, 0.35f));
 }
 
 void Overlay::updateLabels() {
     auto& s = Session::get();
-    std::string info = fmt::format("{} tick {} ({:.3f}s)", modeName(s.mode), s.tick(), ticksToMs(s.tick()) / 1000.0);
-    if (s.paused) info += " | PAUSED";
-    if (s.progress.active) info += fmt::format(" | {} ({} trials)", s.progress.phase, s.progress.done);
-    if (s.selected) {
-        if (auto e = s.project.sequence.find(*s.selected)) {
-            info += fmt::format(" | #{} {} {}{} @{}", e->id, e->down ? "press" : "release", buttonName(e->button),
-                                e->player2 ? " P2" : "", e->tick);
-            if (auto ms = s.selectedMeasurement()) {
-                info += " (" + sgn(e->tick - ms->anchor) + ")";
-                auto rep = ms->report();
-                info += " | " + (s.measurementStale(*s.selected) ? std::string("STALE: ") : std::string()) + rep.summary();
-            }
-        }
+    Tick t = s.tick();
+    std::string hud = fmt::format("Frame: {}, Input: {}", t, s.inputsBefore(t));
+    switch (s.mode) {
+        case Mode::Recording: hud += "  REC"; break;
+        case Mode::Playback: hud += s.paused ? "  PAUSED" : "  REPLAY"; break;
+        case Mode::Testing:
+            hud += fmt::format("  ANALYZING {}{}", s.progress.phase,
+                               s.progress.queueLeft > 0 ? fmt::format(" ({} left)", s.progress.queueLeft) : "");
+            break;
+        case Mode::Idle:
+            if (s.paused) hud += "  PAUSED";
+            break;
     }
-    info += fmt::format(" | {}", s.shiftMode == ShiftMode::Ripple ? "ripple" : "single");
-    auto g = s.effectiveGoal();
-    info += g.kind == Goal::Kind::CompleteLevel ? " | goal: complete" : fmt::format(" | goal: tick {}", g.tick);
-    if (!s.project.hasGoal) info += "(auto)";
-    if (s.diag.tickJumps || s.diag.lateInputs)
-        info += fmt::format(" | WARN jumps {} late {}", s.diag.tickJumps, s.diag.lateInputs);
-    if (!s.diag.lockedThisRun && s.mode == Mode::Recording) info += " | unlocked";
-    m_info->setString(info.c_str());
-    m_info->limitLabelWidth(stripRect().size.width, 0.42f, 0.2f);
+    if (s.shiftMode == ShiftMode::Ripple) hud += "  [ripple]";
+    if (s.circleTool) hud += "  [circle tool]";
+    m_hud->setString(hud.c_str());
+    m_hud->setColor(s.mode == Mode::Recording ? ccColor3B{255, 120, 120} : ccColor3B{255, 255, 255});
 
     m_status->setString(s.status.c_str());
-    m_status->setColor(s.statusIsError ? ccColor3B{255, 110, 110} : ccColor3B{255, 255, 255});
-    m_status->limitLabelWidth(stripRect().size.width * 0.55f, 0.42f, 0.2f);
+    m_status->setColor(s.statusIsError ? ccColor3B{255, 120, 120} : ccColor3B{210, 210, 210});
+    m_status->limitLabelWidth(CCDirector::get()->getWinSize().width * 0.62f, 0.38f, 0.15f);
 
-    // tooltip with exact tick/time/marker/result under the mouse
+    // window summary for the selected input
+    std::string win;
+    if (auto ms = s.selectedMeasurement()) {
+        auto rep = ms->report();
+        win = (s.measurementStale(*s.selected) ? "STALE  " : "") + rep.summary();
+    }
+    m_window->setString(win.c_str());
+    m_window->limitLabelWidth(CCDirector::get()->getWinSize().width * 0.5f, 0.38f, 0.15f);
+
+    // tooltip
     auto mouse = convertToNodeSpace(geode::cocos::getMousePos());
-    auto r = stripRect();
-    if (r.containsPoint(mouse)) {
+    auto r = panelRect();
+    if (r.containsPoint(mouse) && m_drag != Drag::Pan) {
         float lx = mouse.x - r.getMinX();
-        Tick t = m_view.xToTick(lx);
-        std::string tip = fmt::format("tick {} | {:.2f} ms", t, ticksToMs(t));
-        if (auto id = markerAt(lx))
-            if (auto e = s.project.sequence.find(*id))
-                tip = fmt::format("#{} {} {} @ tick {} ({:.2f} ms)", e->id, e->down ? "press" : "release",
-                                  buttonName(e->button), e->tick, ticksToMs(e->tick));
+        Tick mt = m_view.xToTick(lx);
+        std::string tip = fmt::format("frame {}", std::max<Tick>(0, mt));
+        if (auto id = markerAt(mouse))
+            if (auto e = s.project.sequence.find(*id)) {
+                tip = fmt::format("{}: {} {} P{} @ {}", *s.project.sequence.indexOf(*id) + 1, e->down ? "+" : "-",
+                                  buttonWord(e->button), e->player2 ? 2 : 1, e->tick);
+                if (auto ms = s.measurementFor(*id)) {
+                    auto wc = windowCount(*ms);
+                    if (wc.measured) tip += fmt::format("  |  window {}{}", wc.count, wc.exact ? "" : "+");
+                }
+            }
         if (auto ms = s.selectedMeasurement())
-            if (auto it = ms->byTick.find(t); it != ms->byTick.end())
-                tip += fmt::format(" | {} {}", sgn(t - ms->anchor), outcomeName(it->second));
+            if (auto it = ms->byTick.find(mt); it != ms->byTick.end())
+                tip += fmt::format("  |  {} {}", sgn(mt - ms->anchor), outcomeName(it->second));
         m_tooltip->setString(tip.c_str());
-        m_tooltip->setPosition({std::clamp(mouse.x, r.getMinX() + 60.f, r.getMaxX() - 60.f), r.getMaxY() + kButtonRow + 14.f});
+        m_tooltip->setPosition({std::clamp(mouse.x, r.getMinX() + 50.f, r.getMaxX() - 50.f), r.getMaxY() + 17.f});
         m_tooltip->setVisible(true);
     } else {
         m_tooltip->setVisible(false);
@@ -414,17 +607,21 @@ void Overlay::updateLabels() {
 
 void Overlay::updateButtons() {
     auto& s = Session::get();
-    auto tint = [&](char const* k, bool on, ccColor3B c = {120, 255, 140}) {
-        auto spr = static_cast<ButtonSprite*>(m_buttons[k]->getNormalImage());
-        spr->setColor(on ? c : ccColor3B{255, 255, 255});
+    auto tint = [&](std::vector<std::pair<std::string, CCMenuItemSpriteExtra*>>& list, char const* k, bool on) {
+        for (auto& [key, item] : list)
+            if (key == k) static_cast<ButtonSprite*>(item->getNormalImage())->setColor(on ? ccColor3B{255, 255, 255} : ccColor3B{150, 150, 150});
     };
-    tint("rec", s.mode == Mode::Recording, {255, 90, 90});
-    tint("play", s.mode == Mode::Playback);
-    tint("pause", s.paused, {255, 220, 90});
-    tint("test", s.progress.active && !s.project.sequence.empty());
-    tint("circle", s.circleTool, {255, 200, 60});
-    tint("hb", s.hitboxes);
-    tint("mode", s.shiftMode == ShiftMode::Ripple, {120, 200, 255});
+    // lit = active
+    tint(m_left, "rec", s.mode == Mode::Recording);
+    tint(m_left, "hb", s.hitboxes);
+    tint(m_left, "circle", s.circleTool);
+    tint(m_left, "ci", true);
+    tint(m_right, "play", s.mode == Mode::Playback && !s.paused);
+    tint(m_right, "analyze", s.mode == Mode::Testing || true);
+    tint(m_right, "back", true);
+    tint(m_right, "step", true);
+    tint(m_right, "add", true);
+    tint(m_right, "test", true);
 }
 
 // ------------------------------------------------------------ touches
@@ -435,22 +632,26 @@ bool Overlay::ccTouchBegan(CCTouch* touch, CCEvent*) {
     auto p = convertToNodeSpace(touch->getLocation());
     if (overButtons(p)) return false; // let the CCMenu take it
 
-    if (overStrip(p)) {
+    if (overPanel(p)) {
         m_focus = true;
-        float lx = p.x - stripRect().getMinX();
-        m_dragLastX = lx;
+        float lx = p.x - panelRect().getMinX();
+        m_dragStartX = m_dragLastX = lx;
+        m_dragMoved = false;
         auto kb = CCKeyboardDispatcher::get();
         if (kb->getAltKeyPressed()) {
             s.setGoalTick(m_view.xToTick(lx));
+            m_drag = Drag::None;
             return true;
         }
-        if (auto id = markerAt(lx)) {
+        float playX = m_view.tickToX(static_cast<double>(s.tick()));
+        if (auto id = markerAt(p)) {
             s.select(id);
             s.beginDrag();
             m_drag = Drag::Marker;
+        } else if (std::abs(playX - lx) < 4.f && s.mode != Mode::Testing) {
+            m_drag = Drag::Scrub;
         } else {
             m_drag = Drag::Pan;
-            s.followPlayhead = false;
         }
         return true;
     }
@@ -458,7 +659,6 @@ bool Overlay::ccTouchBegan(CCTouch* touch, CCEvent*) {
     m_focus = false;
     if (s.circleTool && m_pl->m_objectLayer) {
         auto w = toWorld(touch);
-        m_dragStartWorld = w;
         if (auto hit = s.project.circles.hitTest(w.x, w.y)) {
             s.selectedCircle = hit;
             auto c = s.project.circles.find(*hit);
@@ -484,13 +684,18 @@ bool Overlay::ccTouchBegan(CCTouch* touch, CCEvent*) {
 void Overlay::ccTouchMoved(CCTouch* touch, CCEvent*) {
     auto& s = Session::get();
     auto p = convertToNodeSpace(touch->getLocation());
-    float lx = p.x - stripRect().getMinX();
+    float lx = p.x - panelRect().getMinX();
+    if (std::abs(lx - m_dragStartX) > 3.f) m_dragMoved = true;
     switch (m_drag) {
         case Drag::Marker:
-            s.dragTo(m_view.xToTick(std::clamp(lx, 0.f, m_view.width))); // snapped to whole ticks
+            s.dragTo(m_view.xToTick(std::clamp(lx, 0.f, m_view.width))); // snapped to whole frames
             break;
+        case Drag::Scrub: m_dragLastX = lx; break;
         case Drag::Pan:
-            m_view.scrollPx(m_dragLastX - lx);
+            if (m_dragMoved) {
+                m_view.scrollPx(m_dragLastX - lx);
+                m_userView = true;
+            }
             m_dragLastX = lx;
             break;
         case Drag::CircleMove:
@@ -513,8 +718,24 @@ void Overlay::ccTouchMoved(CCTouch* touch, CCEvent*) {
     }
 }
 
-void Overlay::ccTouchEnded(CCTouch*, CCEvent*) {
-    if (m_drag == Drag::Marker) Session::get().endDrag();
+void Overlay::ccTouchEnded(CCTouch* touch, CCEvent*) {
+    auto& s = Session::get();
+    auto p = convertToNodeSpace(touch->getLocation());
+    float lx = p.x - panelRect().getMinX();
+    switch (m_drag) {
+        case Drag::Marker: s.endDrag(); break;
+        case Drag::Scrub:
+            if (m_dragMoved) s.seekTo(m_view.xToTick(std::clamp(lx, 0.f, m_view.width)));
+            break;
+        case Drag::Pan:
+            // a plain click on the timeline jumps there
+            if (!m_dragMoved && s.mode != Mode::Testing) {
+                s.select(std::nullopt);
+                s.seekTo(m_view.xToTick(lx));
+            }
+            break;
+        default: break;
+    }
     m_drag = Drag::None;
 }
 
@@ -524,17 +745,14 @@ void Overlay::ccTouchCancelled(CCTouch* t, CCEvent* e) { ccTouchEnded(t, e); }
 
 bool Overlay::onScroll(float y, float) {
     auto& s = Session::get();
-    if (!s.overlayVisible) return false;
+    if (!s.overlayVisible || !isVisible()) return false;
     auto mouse = convertToNodeSpace(geode::cocos::getMousePos());
     auto kb = CCKeyboardDispatcher::get();
-    if (overStrip(mouse)) {
-        float lx = mouse.x - stripRect().getMinX();
-        if (kb->getShiftKeyPressed()) {
-            m_view.scrollPx(y > 0 ? 40.f : -40.f);
-            s.followPlayhead = false;
-        } else {
-            m_view.zoomAround(lx, y > 0 ? 1 / 1.25 : 1.25);
-        }
+    if (overPanel(mouse)) {
+        float lx = mouse.x - panelRect().getMinX();
+        if (kb->getShiftKeyPressed()) m_view.scrollPx(y > 0 ? 40.f : -40.f);
+        else m_view.zoomAround(lx, y > 0 ? 1 / 1.2 : 1.2);
+        m_userView = true;
         return true;
     }
     if (s.circleTool && s.selectedCircle) {
@@ -549,6 +767,7 @@ bool Overlay::onScroll(float y, float) {
 bool Overlay::onKey(enumKeyCodes key, bool repeat, bool shift, bool ctrl, bool alt) {
     auto& s = Session::get();
     if (m_pl->m_isPaused) return false; // GD pause menu is open
+    int raw = static_cast<int>(key);
     if (key == KEY_F1 && !repeat) {
         s.overlayVisible = !s.overlayVisible;
         return true;
@@ -557,18 +776,22 @@ bool Overlay::onKey(enumKeyCodes key, bool repeat, bool shift, bool ctrl, bool a
 
     switch (key) {
         case KEY_F2: if (!repeat) s.hitboxes = !s.hitboxes; return true;
-        case KEY_F3: if (!repeat) s.toggleRecording(); return true;
-        case KEY_F4: if (!repeat) s.togglePlayback(); return true;
+        case KEY_F3: if (!repeat) { s.toggleRecording(); m_userView = false; } return true;
+        case KEY_F4: if (!repeat) { s.togglePlayback(); m_userView = false; } return true;
         case KEY_F5: if (!repeat) s.testSelected(); return true;
-        case KEY_F6: if (!repeat) s.sweepSelected(); return true;
-        case KEY_F7: if (!repeat) s.circleTool = !s.circleTool; return true;
-        case KEY_F8: if (!repeat) s.generateCircles(); return true;
+        case KEY_F6: if (!repeat) shift ? s.analyzeAll() : s.sweepSelected(); return true;
+        case KEY_F7: if (!repeat) onCircleTool(nullptr); return true;
+        case KEY_F8: if (!repeat) s.refreshIndicators(); return true;
         case KEY_F9: if (!repeat) s.togglePause(); return true;
         case KEY_F10: if (!repeat) s.stopAll("Stopped."); return true;
-        case KEY_OEMPeriod: s.stepForward(shift ? 10 : 1); return true;
-        case KEY_OEMComma: s.stepBack(shift ? 10 : 1); return true;
+        case KEY_OEMPeriod: s.stepForward(shift ? 10 : 1); m_userView = false; return true;
+        case KEY_OEMComma: s.stepBack(shift ? 10 : 1); m_userView = false; return true;
         default: break;
     }
+    // [ and ] select the previous / next input any time
+    if (raw == 0xDB || key == KEY_LeftBracket) { s.selectNeighbour(-1); return true; }
+    if (raw == 0xDD || key == KEY_RightBracket) { s.selectNeighbour(1); return true; }
+
     if (ctrl && !repeat) {
         switch (key) {
             case KEY_Z: shift ? s.redo() : s.undo(); return true;
@@ -583,9 +806,8 @@ bool Overlay::onKey(enumKeyCodes key, bool repeat, bool shift, bool ctrl, bool a
     if (s.circleTool && s.selectedCircle && !ctrl) {
         auto c = s.project.circles.find(*s.selectedCircle);
         if (c) {
-            int k = static_cast<int>(key);
-            if (k >= KEY_One && k <= KEY_Six) {
-                c->color = kPalette[k - KEY_One];
+            if (raw >= KEY_One && raw <= KEY_Six) {
+                c->color = kPalette[raw - KEY_One];
                 return true;
             }
             switch (key) {
@@ -605,7 +827,7 @@ bool Overlay::onKey(enumKeyCodes key, bool repeat, bool shift, bool ctrl, bool a
                 case KEY_L:
                     if (s.selected) {
                         c->linkedInput = s.selected;
-                        s.setStatus(fmt::format("Circle linked to input #{}.", *s.selected));
+                        s.setStatus("Circle linked to the selected input.");
                     }
                     return true;
                 case KEY_Delete:
@@ -615,67 +837,84 @@ bool Overlay::onKey(enumKeyCodes key, bool repeat, bool shift, bool ctrl, bool a
         }
     }
 
-    // timeline editing keys need focus (click the timeline) and no live recording
-    if (!m_focus || s.mode == Mode::Recording) return false;
+    // editing keys: while paused (F9 / '.') or after clicking the timeline,
+    // so they never steal arrow-key / space jumps during normal play
+    if (!editKeysActive()) return false;
     switch (key) {
         case KEY_Left:
         case KEY_Right: {
-            Tick d = key == KEY_Left ? -1 : 1;
+            Tick d = (key == KEY_Left ? -1 : 1) * (shift ? 10 : 1);
             auto prev = s.shiftMode;
             if (ctrl) s.shiftMode = ShiftMode::Ripple;
             s.shiftSelected(d);
             s.shiftMode = prev;
             if (s.selected)
-                if (auto e = s.project.sequence.find(*s.selected)) m_view.ensureVisible(e->tick);
+                if (auto e = s.project.sequence.find(*s.selected)) m_view.ensureVisible(e->tick, 30.f);
             return true;
         }
         case KEY_Up: s.selectNeighbour(-1); return true;
         case KEY_Down: s.selectNeighbour(1); return true;
         case KEY_M: if (!repeat) s.toggleShiftMode(); return true;
-        case KEY_F: if (!repeat) s.followPlayhead = !s.followPlayhead; return true;
+        case KEY_F: if (!repeat) fitAll(); return true;
+        case KEY_Home: if (!repeat) s.seekTo(0); return true;
+        case KEY_End: if (!repeat) s.seekTo(s.project.sequence.lastTick()); return true;
+        case KEY_Insert:
+        case KEY_I: if (!repeat) s.addClickAtPlayhead(); return true;
         case KEY_G:
             if (repeat) return true;
-            if (shift) s.setGoalComplete();
+            if (ctrl) s.clearGoal();
+            else if (shift) s.setGoalComplete();
             else s.setGoalTick(s.tick());
             return true;
         case KEY_Delete:
         case KEY_Backspace: s.deleteSelected(); return true;
-        case KEY_PageUp: m_view.zoomAround(m_view.tickToX(static_cast<double>(s.tick())), 1.25); return true;
-        case KEY_PageDown: m_view.zoomAround(m_view.tickToX(static_cast<double>(s.tick())), 1 / 1.25); return true;
+        case KEY_PageUp: m_view.zoomAround(m_view.tickToX(static_cast<double>(s.tick())), 1.25); m_userView = true; return true;
+        case KEY_PageDown: m_view.zoomAround(m_view.tickToX(static_cast<double>(s.tick())), 1 / 1.25); m_userView = true; return true;
         case KEY_Escape: m_focus = false; return false; // let GD open its pause menu too
         default: break;
     }
-    int raw = static_cast<int>(key);
-    if (key == KEY_OEMPlus || raw == 0xBB) { m_view.zoomAround(m_view.width / 2, 1.25); return true; }
-    if (key == KEY_OEMMinus) { m_view.zoomAround(m_view.width / 2, 1 / 1.25); return true; }
+    if (raw == 0xBB || key == KEY_OEMPlus) { m_view.zoomAround(m_view.width / 2, 1.25); m_userView = true; return true; }
+    if (key == KEY_OEMMinus) { m_view.zoomAround(m_view.width / 2, 1 / 1.25); m_userView = true; return true; }
     (void)alt;
     return false;
 }
 
 // ------------------------------------------------------------ buttons
 
-void Overlay::onRec(CCObject*) { Session::get().toggleRecording(); }
-void Overlay::onPlay(CCObject*) { Session::get().togglePlayback(); }
-void Overlay::onPause(CCObject*) { Session::get().togglePause(); }
-void Overlay::onStepBack(CCObject*) { Session::get().stepBack(1); }
-void Overlay::onStep(CCObject*) { Session::get().stepForward(1); }
-void Overlay::onTest(CCObject*) { Session::get().testSelected(); }
-void Overlay::onSweep(CCObject*) { Session::get().sweepSelected(); }
-void Overlay::onStop(CCObject*) { Session::get().stopAll("Stopped."); }
-void Overlay::onMode(CCObject*) { Session::get().toggleShiftMode(); }
-void Overlay::onCircleTool(CCObject*) {
-    auto& s = Session::get();
-    s.circleTool = !s.circleTool;
-    s.setStatus(s.circleTool ? "Circle tool: click to place, drag to size, Shift+drag to resize, 1-6 colour."
-                             : "Circle tool off.");
+void Overlay::onCI(CCObject*) { Session::get().refreshIndicators(); }
+void Overlay::onRec(CCObject*) {
+    Session::get().toggleRecording();
+    m_userView = false;
 }
-void Overlay::onUndo(CCObject*) { Session::get().undo(); }
-void Overlay::onRedo(CCObject*) { Session::get().redo(); }
-void Overlay::onSave(CCObject*) { Session::get().save(); }
-void Overlay::onLoad(CCObject*) { Session::get().load(); }
 void Overlay::onHitboxes(CCObject*) {
     auto& s = Session::get();
     s.hitboxes = !s.hitboxes;
+}
+void Overlay::onCircleTool(CCObject*) {
+    auto& s = Session::get();
+    s.circleTool = !s.circleTool;
+    s.setStatus(s.circleTool ? "Circle tool: click to place, drag to size, Shift+drag resizes, 1-6 colour, Del removes."
+                             : "Circle tool off.");
+}
+void Overlay::onPlay(CCObject*) {
+    Session::get().togglePlayback();
+    m_userView = false;
+}
+void Overlay::onStepBack(CCObject*) {
+    Session::get().stepBack(1);
+    m_userView = false;
+}
+void Overlay::onStep(CCObject*) {
+    Session::get().stepForward(1);
+    m_userView = false;
+}
+void Overlay::onAdd(CCObject*) { Session::get().addClickAtPlayhead(); }
+void Overlay::onTest(CCObject*) { Session::get().testSelected(); }
+void Overlay::onAnalyze(CCObject*) {
+    auto& s = Session::get();
+    if (s.mode == Mode::Testing) return s.stopAll("stopped");
+    if (CCKeyboardDispatcher::get()->getShiftKeyPressed()) s.sweepSelected();
+    else s.analyzeAll();
 }
 
 } // namespace fwl::gd

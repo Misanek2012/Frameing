@@ -89,6 +89,7 @@ CXXFLAGS=(
     -DGEODE_GD_VERSION="$GD_VERSION" -DGEODE_COMP_GD_VERSION="${GD_VERSION/./}"
     "-DGEODE_GD_VERSION_STRING=\"$GD_VERSION\"" "-DGEODE_MOD_ID=\"fwlab.frame-window-lab\""
     -DPROJECT_NAME=FrameWindowLab
+    "-Dnear=" "-Dfar=" # <windows.h> defines these as empty macros; catch identifiers named near/far
     -include "$ROOT/scripts/stubs/ndk_alias.hpp" -include cstdarg
     -I"$WORK/gen-android" -I"$WORK/bindings/bindings/include"
     -I"$G" -I"$G/Geode/cocos/include" -I"$G/Geode/cocos/extensions" -I"$G/Geode/fmod"
@@ -125,6 +126,9 @@ while IFS= read -r f; do
         echo "  ok   ${f#"$ROOT"/}"
     fi
 done < <(find "$ROOT/src" -name '*.cpp' | sort)
+
+echo "== checking settings used by the code exist in mod.json"
+python3 "$ROOT/scripts/settings_check.py" || fail=1
 
 echo "== verifying hooks against Win64 bindings"
 python3 "$ROOT/scripts/hook_check.py" --self-test "$WORK/gen-win/Geode/CodegenData.json" | tail -1

@@ -37,10 +37,14 @@ class $modify(FWLBaseGameLayer, GJBaseGameLayer) {
         auto& s = Session::get();
         if (!s.isLayer(this) || !s.controlsTicks()) return GJBaseGameLayer::update(dt);
         int n = s.ticksForFrame(dt);
+        bool fast = s.fastRun();
+        auto deadline = s.frameDeadline();
         s.inLockedUpdate = true;
         for (int i = 0; i < n; ++i) {
             GJBaseGameLayer::update(static_cast<float>(s.stepSize()));
             if (s.breakLoop || !s.isLayer(this)) break;
+            // Fast replays: as many physics steps as fit in this frame's time budget.
+            if (fast && (i & 7) == 7 && std::chrono::steady_clock::now() >= deadline) break;
         }
         s.inLockedUpdate = false;
     }

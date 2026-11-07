@@ -41,7 +41,7 @@ void loadStyle() {
         g_style.color[i] = cfg::toF(cfg::rgba(std::string("hb-color-") + keys[i]));
     }
     g_style.thickness = static_cast<float>(cfg::real("hb-thickness"));
-    g_style.fill = static_cast<float>(cfg::real("hb-fill"));
+    g_style.fill = static_cast<float>(cfg::real("hb-fill-opacity"));
 }
 
 bool matchesPlayer(CCRect const& box) {

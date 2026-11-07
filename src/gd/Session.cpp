@@ -2,10 +2,13 @@
 #include "Settings.hpp"
 #include "Sounds.hpp"
 
+#include <Geode/binding/FMODAudioEngine.hpp>
 #include <Geode/binding/GJGameLevel.hpp>
 #include <Geode/binding/PlayLayer.hpp>
 #include <Geode/binding/PlayerObject.hpp>
+#include <Geode/ui/Notification.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <limits>
@@ -25,6 +28,23 @@ std::filesystem::path projectPath(Project const& p) {
     if (name.empty()) name = "level";
     return Mod::get()->getSaveDir() / "projects" / fmt::format("{}-{}.fwl", p.levelId, name);
 }
+
+std::uint64_t sequenceHash(InputSequence const& seq) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (auto const& e : seq.events()) {
+        h = fnv1a(&e.tick, sizeof e.tick, h);
+        std::uint8_t b[3] = {static_cast<std::uint8_t>(e.button), e.down, e.player2};
+        h = fnv1a(b, sizeof b, h);
+    }
+    return h;
+}
+
+StateTrace truncatedTrace(StateTrace const& t, Tick before) {
+    StateTrace out;
+    for (auto const& [tick, h] : t.entries())
+        if (tick < before) out.push(tick, h);
+    return out;
+}
 } // namespace
 
 Session& Session::get() {
@@ -39,6 +59,11 @@ void Session::setStatus(std::string s, bool error) {
     statusIsError = error;
 }
 
+void Session::notify(std::string const& s, bool error) {
+    setStatus(s, error);
+    Notification::create(s, error ? NotificationIcon::Error : NotificationIcon::Success, 1.6f)->show();
+}
+
 bool Session::isLayer(GJBaseGameLayer const* l) const {
     return m_layer && l && static_cast<GJBaseGameLayer const*>(m_layer) == l;
 }
@@ -47,10 +72,32 @@ Tick Session::tick() const {
     return m_layer ? static_cast<Tick>(m_layer->m_gameState.m_currentProgress) : 0;
 }
 
+int Session::inputsBefore(Tick t) const {
+    auto const& ev = project.sequence.events();
+    auto it = std::upper_bound(ev.begin(), ev.end(), t, [](Tick v, InputEvent const& e) { return v < e.tick; });
+    return static_cast<int>(it - ev.begin());
+}
+
 double Session::stepSize() const {
     double warp = m_layer ? m_layer->m_gameState.m_timeWarp : 1.0;
     if (!(warp > 0.0)) warp = 1.0;
     return std::min(1.0, warp) / kTicksPerSecond;
+}
+
+std::optional<Pos> Session::playerPos(bool p2) const {
+    if (!m_layer) return std::nullopt;
+    auto p = p2 ? m_layer->m_player2 : m_layer->m_player1;
+    if (!p) return std::nullopt;
+    return Pos{p->getPositionX(), p->getPositionY()};
+}
+
+void Session::setMusicPaused(bool p) {
+    if (p == m_musicPaused) return;
+    m_musicPaused = p;
+    auto fmod = FMODAudioEngine::get();
+    if (!fmod) return;
+    if (p) fmod->pauseAllMusic(true);
+    else fmod->resumeAllMusic();
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -59,11 +106,13 @@ void Session::attach(PlayLayer* pl) {
     m_layer = pl;
     m_run = {};
     m_job.reset();
+    m_queue.clear();
     m_cursor.reset(nullptr);
     mode = Mode::Idle;
     paused = false;
     m_pendingSteps = 0;
     m_accum = 0;
+    m_musicPaused = false;
     selected.reset();
     selectedCircle.reset();
     circleTool = false;
@@ -71,34 +120,52 @@ void Session::attach(PlayLayer* pl) {
     m_recordTrace.clear();
     m_recordedSeq.reset();
     m_baselineVerifiedFor.reset();
+    std::memset(m_held, 0, sizeof m_held);
     history.clear();
+    path.clear();
+    inputPos.clear();
+    ++pathVersion;
+    ++indicatorVersion;
+    deathTick.reset();
+    resetTick = -1;
     overlayVisible = cfg::flag("show-overlay");
     hitboxes = cfg::flag("hitboxes");
     diag = {};
     diag.phase = static_cast<InjectPhase>(Mod::get()->getSavedValue<int>("inject-phase", 0));
     diag.phaseCalibrated = Mod::get()->getSavedValue<bool>("inject-phase-calibrated", false);
 
+    conflictWarning.clear();
+    if (Loader::get()->isModLoaded("syzzi.click_between_frames"))
+        conflictWarning = "Click Between Frames is enabled: it moves clicks between physics ticks, so recordings "
+                          "may not replay exactly. Disable it while measuring.";
+
     project = {};
     project.levelId = pl->m_level ? pl->m_level->m_levelID.value() : 0;
     project.levelName = pl->m_level ? std::string(pl->m_level->m_levelName) : "";
     if (std::filesystem::exists(projectPath(project))) load();
-    else setStatus("F3 records an attempt. F1 hides this overlay.");
+    else setStatus("R / F3 records an attempt. F1 hides the timeline.");
+    if (!conflictWarning.empty()) setStatus(conflictWarning, true);
 }
 
 void Session::detach(PlayLayer* pl) {
     if (m_layer != pl) return;
-    if (!project.sequence.empty() || !project.circles.circles().empty()) save();
+    if (!project.sequence.empty() || !project.circles.circles().empty()) save(true);
+    setMusicPaused(false);
     m_job.reset();
+    m_queue.clear();
     m_run = {};
     m_cursor.reset(nullptr);
     mode = Mode::Idle;
+    paused = false;
     m_layer = nullptr;
 }
 
 void Session::requestReset() {
     Loader::get()->queueInMainThread([] {
         auto& s = Session::get();
-        if (s.m_layer) s.m_layer->resetLevelFromStart();
+        if (!s.m_layer) return;
+        if (s.m_layer->m_isPracticeMode) s.m_layer->removeAllCheckpoints();
+        s.m_layer->resetLevelFromStart();
     });
 }
 
@@ -124,10 +191,30 @@ void Session::onReset() {
     breakLoop = true;
 
     Tick t0 = tick();
+    bool tracksPath = m_run.kind == RunKind::Play;
+
     if (mode == Mode::Recording && m_run.kind == RunKind::Record) {
         if (t0 != 0) {
-            stopAll();
-            setStatus("Recording needs a reset to tick 0. Disable practice checkpoints or restart from the start.", true);
+            // Practice-mode checkpoint: keep everything before it, re-record from here.
+            history.apply(project.sequence, [t0](InputSequence& s) {
+                s.truncateFrom(t0);
+                return Status::success();
+            });
+            for (int p = 0; p < 2; ++p)
+                for (int b = 1; b <= 3; ++b) {
+                    // A press still held at the checkpoint is released there.
+                    InputEvent const* last = nullptr;
+                    for (auto const& e : project.sequence.events())
+                        if (static_cast<int>(e.button) == b && e.player2 == (p == 1)) last = &e;
+                    if (last && last->down) project.sequence.add(t0, static_cast<Button>(b), false, p == 1);
+                }
+            std::memset(m_held, 0, sizeof m_held);
+            m_recordTrace = truncatedTrace(m_recordTrace, t0);
+            if (static_cast<Tick>(path.size()) > t0 - pathStart && t0 >= pathStart) path.resize(t0 - pathStart);
+            ++pathVersion;
+            resetTick = t0;
+            m_run.injectUntil = std::min(m_run.injectUntil, t0);
+            setStatus(fmt::format("Checkpoint at frame {}: inputs after it were discarded, keep playing.", t0));
             return;
         }
         if (m_recordArmed) {
@@ -141,22 +228,42 @@ void Session::onReset() {
             m_recordArmed = false;
             project.startTick = 0;
             project.measurements.clear(); // old measurements refer to a different attempt
+            ++indicatorVersion;
+            deathTick.reset();
         } else {
             // Manual restart while recording: start the attempt again from the same point.
             project.sequence.truncateFrom(m_run.injectUntil);
         }
+        std::memset(m_held, 0, sizeof m_held);
+        // A prefix that is replayed counts as already pressed/released.
+        for (auto const& e : project.sequence.events())
+            m_held[e.player2 ? 1 : 0][static_cast<int>(e.button) & 3] = e.down;
         m_recordTrace.clear();
-        selected.reset();
+        path.clear();
+        pathStart = 0;
+        m_pathSeqHash = 0;
+        ++pathVersion;
         return;
     }
     if ((mode == Mode::Testing || mode == Mode::Playback) && t0 != 0) {
         if (mode == Mode::Testing) {
-            failJob("Level did not reset to tick 0 (practice checkpoint?). Tests always start from the level start.");
+            failJob("The level did not restart at frame 0 (practice checkpoint?). Tests always start from the beginning.");
             return;
         }
         m_cursor.seek(t0);
-        setStatus(fmt::format("Playback resumed from tick {} (checkpoint): earlier inputs skipped, not tick-exact.", t0),
+        setStatus(fmt::format("Replay resumed from frame {} (checkpoint): earlier inputs skipped, not frame-exact.", t0),
                   true);
+    }
+    if (tracksPath) {
+        // Same inputs as the drawn path: keep it (points are overwritten identically),
+        // so the full trajectory stays visible ahead of the playhead.
+        auto h = sequenceHash(m_run.sequence);
+        if (h != m_pathSeqHash || pathStart != t0) {
+            path.clear();
+            pathStart = t0;
+            m_pathSeqHash = h;
+            ++pathVersion;
+        }
     }
 }
 
@@ -172,15 +279,23 @@ bool Session::controlsTicks() const {
     return false;
 }
 
+std::chrono::steady_clock::time_point Session::frameDeadline() const {
+    auto ms = std::clamp<std::int64_t>(cfg::integer("replay-budget-ms"), 2, 100);
+    return m_frameStart + std::chrono::milliseconds(ms);
+}
+
 int Session::ticksForFrame(float dt) {
     breakLoop = false;
-    if (mode == Mode::Testing && (m_run.finished || m_run.kind == RunKind::None)) return 0;
+    m_frameStart = std::chrono::steady_clock::now();
+    bool testing = mode == Mode::Testing;
+    setMusicPaused(paused || fastRun() || testing);
+    if (testing && (m_run.finished || m_run.kind == RunKind::None)) return 0;
     if (paused) {
         int n = m_pendingSteps;
         m_pendingSteps = 0;
         return n;
     }
-    if (m_run.fast || m_run.pauseAt) return static_cast<int>(cfg::integer("test-ticks-per-frame"));
+    if (fastRun()) return 1'000'000; // bounded by frameDeadline()
     double step = stepSize();
     m_accum += std::min<double>(dt, 0.25);
     int n = static_cast<int>(m_accum / step);
@@ -210,12 +325,27 @@ void Session::onAfterStep() {
     Tick t = tick();
     runEndTick = t;
 
+    if (m_run.kind == RunKind::Record || m_run.kind == RunKind::Play) {
+        if (auto p = playerPos()) {
+            Tick idx = t - pathStart;
+            if (idx >= 0 && idx < static_cast<Tick>(path.size())) {
+                if (path[idx] != *p) { // diverged from the drawn path
+                    path.resize(idx);
+                    path.push_back(*p);
+                    ++pathVersion;
+                }
+            } else if (idx == static_cast<Tick>(path.size())) {
+                path.push_back(*p);
+            }
+        }
+    }
+
     if (m_run.pauseAt && t >= *m_run.pauseAt) {
         m_run.pauseAt.reset();
         m_run.fast = false;
         paused = true;
         breakLoop = true;
-        setStatus(fmt::format("At tick {}. '.' steps forward, ',' steps back.", t));
+        setStatus(fmt::format("Frame {}. '.' / '>' steps forward, ',' / '<' steps back.", t));
     }
 
     bool testRun = m_run.kind == RunKind::Calibrate || m_run.kind == RunKind::Baseline || m_run.kind == RunKind::Trial;
@@ -242,9 +372,11 @@ void Session::fireDue() {
         case RunKind::None: break;
     }
     if (!inject || !m_layer) return;
+    bool keepPos = m_run.kind == RunKind::Play || m_run.kind == RunKind::Record;
     m_cursor.fireUpTo(tick(), [&](InputEvent const& e) {
-        if (e.id == m_run.watchId && m_layer->m_player1)
-            m_run.watchPos = std::pair{m_layer->m_player1->getPositionX(), m_layer->m_player1->getPositionY()};
+        auto pos = playerPos(e.player2);
+        if (e.id == m_run.watchId && pos) m_run.watchPos = pos;
+        if (keepPos && pos) inputPos[e.id] = *pos;
         injecting = true;
         m_layer->handleButton(e.down, static_cast<int>(e.button), !e.player2);
         injecting = false;
@@ -286,12 +418,14 @@ bool Session::passLiveButton(bool down, int button, bool isPlayer1) {
     if (mode == Mode::Recording && m_run.kind == RunKind::Record) {
         if (tick() < m_run.injectUntil) return false;
         if (button < 1 || button > 3) return true;
+        bool& held = m_held[isPlayer1 ? 0 : 1][button];
+        // A release without a press (e.g. the click that started the attempt) or
+        // a second press while held changes nothing in the game: don't record it.
+        if (held == down) return true;
+        held = down;
         auto id = project.sequence.add(tick(), static_cast<Button>(button), down, !isPlayer1);
-        if (!project.sequence.validate()) {
-            // GD delivered e.g. two presses in a row; the second has no effect on the
-            // press/release state, so it is not stored. Calibration will flag any mismatch.
-            project.sequence.remove(id);
-        }
+        if (!project.sequence.validate()) project.sequence.remove(id);
+        else if (auto p = playerPos(!isPlayer1)) inputPos[id] = *p;
     }
     return true;
 }
@@ -303,21 +437,31 @@ bool Session::onDeath(PlayerObject*, GameObject* object) {
         case RunKind::Record:
             if (t < m_run.injectUntil) {
                 stopAll();
-                setStatus(fmt::format("Rewind replay died at tick {} before reaching tick {}: replay is not reproducing "
-                                      "the recording.",
+                setStatus(fmt::format("The rewind replay died at frame {} before reaching frame {}: the replay does "
+                                      "not reproduce the recording.",
                                       t, m_run.injectUntil),
                           true);
                 return false;
             }
+            if (m_layer->m_isPracticeMode) {
+                setStatus(fmt::format("Died at frame {}. Respawning at the checkpoint; keep recording.", t));
+                return false;
+            }
             runEndTick = t;
+            deathTick = t;
             mode = Mode::Idle;
             m_run.kind = RunKind::None;
             m_recordedSeq = project.sequence;
-            setStatus(fmt::format("Recorded {} inputs; died at tick {}. Select an input on the timeline.",
+            if (!selected) ensureSelection();
+            save(true);
+            setStatus(fmt::format("Recorded {} inputs, died at frame {}. A analyzes every input.",
                                   project.sequence.size(), t));
             return false;
         case RunKind::Play:
-            setStatus(fmt::format("Replay died at tick {}.", t), true);
+            mode = Mode::Idle;
+            m_run = {};
+            m_cursor.reset(nullptr);
+            setStatus(fmt::format("The replay died at frame {}.", t), true);
             return false;
         case RunKind::Calibrate:
         case RunKind::Baseline:
@@ -342,7 +486,9 @@ bool Session::onComplete() {
             mode = Mode::Idle;
             m_run.kind = RunKind::None;
             m_recordedSeq = project.sequence;
-            setStatus(fmt::format("Recorded {} inputs; level completed at tick {}.", project.sequence.size(), t));
+            deathTick.reset();
+            save(true);
+            setStatus(fmt::format("Recorded {} inputs; level completed at frame {}.", project.sequence.size(), t));
             return false;
         case RunKind::Calibrate:
         case RunKind::Baseline:
@@ -383,31 +529,34 @@ void Session::toggleRecording() {
     if (!m_layer) return;
     if (mode == Mode::Recording) {
         stopAll();
+        save(true);
         setStatus(fmt::format("Recording stopped: {} inputs.", project.sequence.size()));
         return;
     }
-    if (mode == Mode::Testing) return setStatus("Finish or cancel the test first.", true);
+    if (mode == Mode::Testing) return setStatus("Finish or stop the analysis first (F10).", true);
     Run r;
     r.kind = RunKind::Record;
     r.injectUntil = 0;
     mode = Mode::Recording;
     m_recordArmed = true;
     paused = false;
+    resetTick = -1;
     startRun(std::move(r), true);
-    setStatus("Recording from the start. Play the attempt; dying or F3 stops it.");
+    setStatus("Recording from the start. Play; dying or R stops it.");
 }
 
 void Session::togglePlayback() {
     if (!m_layer) return;
-    if (mode == Mode::Playback) return stopAll("Playback stopped.");
-    if (mode == Mode::Testing || mode == Mode::Recording) return setStatus("Stop the current mode first.", true);
-    if (project.sequence.empty()) return setStatus("Nothing to replay: record an attempt first (F3).", true);
+    if (mode == Mode::Testing) return setStatus("Analysis running (F10 stops it).", true);
+    if (mode == Mode::Playback) return togglePause();
+    if (mode == Mode::Recording) stopAll();
     auto r = makeReplayRun(project.sequence, RunKind::Play, 0, Goal{Goal::Kind::SurviveUntilTick, kFar});
     r.fast = false;
     mode = Mode::Playback;
     paused = false;
+    resetTick = 0;
     startRun(std::move(r), true);
-    setStatus("Replaying the edited inputs.");
+    setStatus(project.sequence.empty() ? "Replaying (no inputs recorded yet)." : "Replaying the inputs.");
 }
 
 void Session::togglePause() {
@@ -415,14 +564,14 @@ void Session::togglePause() {
     paused = !paused;
     m_pendingSteps = 0;
     m_accum = 0;
-    setStatus(paused ? fmt::format("Paused at tick {}.", tick()) : "Resumed.");
+    setStatus(paused ? fmt::format("Paused at frame {}.", tick()) : "Resumed.");
 }
 
 void Session::stepForward(int n) {
     if (!m_layer || mode == Mode::Testing) return;
     if (!paused) {
         paused = true;
-        setStatus(fmt::format("Paused at tick {}.", tick()));
+        setStatus(fmt::format("Paused at frame {}.", tick()));
         return;
     }
     m_pendingSteps += n;
@@ -431,8 +580,15 @@ void Session::stepForward(int n) {
 
 void Session::stepBack(int n) {
     if (!m_layer || mode == Mode::Testing) return;
-    Tick target = std::max<Tick>(0, tick() - n);
+    seekTo(std::max<Tick>(0, tick() - n));
+    sounds::play(SoundEvent::Step);
+}
+
+void Session::seekTo(Tick target) {
+    if (!m_layer || mode == Mode::Testing) return;
+    target = std::max<Tick>(0, target);
     if (mode == Mode::Recording) {
+        if (target >= tick()) return setStatus("While recording you can only go back.", true);
         // Rewind and re-record: replay inputs before `target`, then hand control back.
         Run r;
         r.kind = RunKind::Record;
@@ -441,39 +597,86 @@ void Session::stepBack(int n) {
         r.fast = true;
         m_recordArmed = true;
         paused = false;
+        resetTick = target;
         startRun(std::move(r), true);
-        setStatus(fmt::format("Rewinding to tick {}; inputs from there will be re-recorded.", target));
-        sounds::play(SoundEvent::Step);
+        setStatus(fmt::format("Rewinding to frame {}; inputs from there will be re-recorded.", target));
         return;
     }
-    if (project.sequence.empty()) return setStatus("Nothing to rewind: record an attempt first.", true);
+    if (mode == Mode::Playback && target > tick()) { // fast-forward the running replay
+        m_run.pauseAt = target;
+        paused = false;
+        return;
+    }
+    if (mode == Mode::Playback && target == tick() && paused) return;
     auto r = makeReplayRun(project.sequence, RunKind::Play, 0, Goal{Goal::Kind::SurviveUntilTick, kFar});
     r.pauseAt = target;
     r.fast = true;
     mode = Mode::Playback;
     paused = false;
+    resetTick = target;
     startRun(std::move(r), true);
-    sounds::play(SoundEvent::Step);
+}
+
+void Session::resimAfterEdit() {
+    if (!cfg::flag("resim-on-edit")) return;
+    if (mode == Mode::Playback && paused) {
+        Tick t = tick();
+        Loader::get()->queueInMainThread([t] {
+            auto& s = Session::get();
+            if (s.mode == Mode::Playback && s.paused) s.seekTo(t);
+        });
+    }
+}
+
+bool Session::editable(bool quiet) {
+    if (mode == Mode::Testing || mode == Mode::Recording) {
+        if (!quiet) setStatus("Inputs can't be edited while recording or analyzing.", true);
+        return false;
+    }
+    return true;
 }
 
 void Session::select(std::optional<std::uint64_t> id, bool withSound) {
     if (id && !project.sequence.find(*id)) id.reset();
     if (id != selected && id && withSound) sounds::play(SoundEvent::Select);
     selected = id;
+    if (id)
+        if (auto idx = project.sequence.indexOf(*id))
+            if (auto e = project.sequence.find(*id))
+                setStatus(fmt::format("{}: {} {} P{} @ {}", *idx + 1, e->down ? "+" : "-",
+                                      e->button == Button::Jump ? "Jump" : e->button == Button::Left ? "Left" : "Right",
+                                      e->player2 ? 2 : 1, e->tick));
 }
 
 void Session::selectNeighbour(int dir) {
     if (project.sequence.empty()) return;
     if (!selected) {
-        auto closest = project.sequence.nearest(tick());
-        return select(closest);
+        ensureSelection();
+        return;
     }
     if (auto n = project.sequence.neighbour(*selected, dir)) select(n);
 }
 
+bool Session::ensureSelection() {
+    if (selected && project.sequence.find(*selected)) return true;
+    if (project.sequence.empty()) {
+        setStatus("No inputs yet: record an attempt first (R / F3).", true);
+        return false;
+    }
+    // The last press at or before the playhead, else the nearest input.
+    Tick t = tick();
+    std::optional<std::uint64_t> pick;
+    for (auto const& e : project.sequence.events()) {
+        if (e.tick > t) break;
+        if (e.down) pick = e.id;
+    }
+    if (!pick) pick = project.sequence.nearest(t);
+    select(pick);
+    return selected.has_value();
+}
+
 void Session::shiftSelected(Tick delta) {
-    if (!selected) return setStatus("Select an input first (click a marker or Up/Down).", true);
-    if (mode == Mode::Testing || mode == Mode::Recording) return setStatus("Can't edit inputs while recording/testing.", true);
+    if (!ensureSelection() || !editable()) return;
     auto id = *selected;
     auto st = history.apply(project.sequence, [&](InputSequence& s) { return s.shift(id, delta, shiftMode); });
     if (!st) return setStatus(st.error, true);
@@ -481,12 +684,13 @@ void Session::shiftSelected(Tick delta) {
     auto ev = project.sequence.find(id);
     std::string rel;
     if (auto ms = selectedMeasurement(); ms && !measurementStale(id)) rel = " (" + sgn(ev->tick - ms->anchor) + ")";
-    setStatus(fmt::format("#{} {} -> tick {}{}{}", id, ev->down ? "press" : "release", ev->tick, rel,
+    setStatus(fmt::format("Input {} -> frame {}{}{}", *project.sequence.indexOf(id) + 1, ev->tick, rel,
                           shiftMode == ShiftMode::Ripple ? " [ripple]" : ""));
+    resimAfterEdit();
 }
 
 void Session::beginDrag() {
-    if (mode == Mode::Testing || mode == Mode::Recording) return;
+    if (!editable(true)) return;
     m_dragOrigin = project.sequence;
 }
 
@@ -494,6 +698,9 @@ void Session::dragTo(Tick t) {
     if (!m_dragOrigin || !selected) return;
     auto ev = project.sequence.find(*selected);
     if (!ev || ev->tick == t) return;
+    // Clamp to the legal range so a fast drag still ends next to its neighbour.
+    auto [lo, hi] = project.sequence.legalRange(*selected);
+    if (shiftMode == ShiftMode::Single) t = std::clamp(t, lo, hi);
     if (project.sequence.setTick(*selected, t, shiftMode)) sounds::play(SoundEvent::MoveInput);
 }
 
@@ -502,13 +709,15 @@ void Session::endDrag() {
     auto after = project.sequence;
     project.sequence = std::move(*m_dragOrigin);
     m_dragOrigin.reset();
+    if (after.events() == project.sequence.events()) return;
     history.apply(project.sequence, [&](InputSequence& s) {
         s = after;
         return Status::success();
     });
     if (selected)
         if (auto ev = project.sequence.find(*selected))
-            setStatus(fmt::format("#{} {} -> tick {}", *selected, ev->down ? "press" : "release", ev->tick));
+            setStatus(fmt::format("Input {} -> frame {}", *project.sequence.indexOf(*selected) + 1, ev->tick));
+    resimAfterEdit();
 }
 
 void Session::deleteSelected() {
@@ -517,12 +726,40 @@ void Session::deleteSelected() {
         selectedCircle.reset();
         return setStatus("Circle deleted.");
     }
-    if (!selected || mode == Mode::Testing || mode == Mode::Recording) return;
+    if (!selected || !editable()) return;
     auto id = *selected;
     auto st = history.apply(project.sequence, [&](InputSequence& s) { return s.removeWithPartner(id); });
     if (!st) return setStatus(st.error, true);
     selected.reset();
-    setStatus("Input (and its matching press/release) deleted. Ctrl+Z to undo.");
+    setStatus("Click deleted (press and its release). Ctrl+Z undoes it.");
+    resimAfterEdit();
+}
+
+void Session::addClickAtPlayhead() {
+    if (!m_layer || !editable()) return;
+    Tick t = tick();
+    std::uint64_t pressId = 0;
+    auto st = history.apply(project.sequence, [&](InputSequence& s) {
+        bool held = false;
+        std::optional<Tick> next;
+        for (auto const& e : s.events()) {
+            if (e.button != Button::Jump || e.player2) continue;
+            if (e.tick <= t) held = e.down;
+            else if (!next) next = e.tick;
+        }
+        if (held) {
+            pressId = s.add(t, Button::Jump, false, false);
+            return s.validate();
+        }
+        if (next && *next <= t + 1) return Status::fail("No room for a click here (next input is on the next frame).");
+        pressId = s.add(t, Button::Jump, true, false);
+        s.add(t + 1, Button::Jump, false, false);
+        return s.validate();
+    });
+    if (!st) return setStatus(st.error, true);
+    select(pressId);
+    setStatus(fmt::format("Added a click at frame {}.", t));
+    resimAfterEdit();
 }
 
 void Session::toggleShiftMode() {
@@ -532,52 +769,67 @@ void Session::toggleShiftMode() {
 }
 
 void Session::undo() {
-    if (mode == Mode::Testing || mode == Mode::Recording) return;
+    if (!editable()) return;
     setStatus(history.undo(project.sequence) ? "Undone." : "Nothing to undo.");
     select(selected, false);
+    resimAfterEdit();
 }
 
 void Session::redo() {
-    if (mode == Mode::Testing || mode == Mode::Recording) return;
+    if (!editable()) return;
     setStatus(history.redo(project.sequence) ? "Redone." : "Nothing to redo.");
     select(selected, false);
+    resimAfterEdit();
 }
 
-void Session::save() {
-    auto path = projectPath(project);
-    auto dir = path.parent_path();
+void Session::save(bool quiet) {
+    auto path_ = projectPath(project);
+    auto dir = path_.parent_path();
     if (auto r = utils::file::createDirectoryAll(dir); r.isErr())
         return setStatus("Save failed: " + r.unwrapErr(), true);
-    if (std::filesystem::exists(path)) {
+    if (std::filesystem::exists(path_)) {
         std::error_code ec;
-        std::filesystem::copy_file(path, path.string() + ".bak", std::filesystem::copy_options::overwrite_existing, ec);
+        std::filesystem::copy_file(path_, path_.string() + ".bak", std::filesystem::copy_options::overwrite_existing,
+                                   ec);
     }
-    if (auto r = utils::file::writeStringSafe(path, serializeProject(project)); r.isErr())
+    if (auto r = utils::file::writeStringSafe(path_, serializeProject(project)); r.isErr())
         return setStatus("Save failed: " + r.unwrapErr(), true);
-    setStatus("Saved " + utils::string::pathToString(path.filename()));
+    if (quiet) log::info("Saved {}", utils::string::pathToString(path_.filename()));
+    else notify("Saved " + utils::string::pathToString(path_.filename()));
 }
 
 void Session::load() {
-    auto path = projectPath(project);
-    auto text = utils::file::readString(path);
+    auto path_ = projectPath(project);
+    auto text = utils::file::readString(path_);
     if (text.isErr()) return setStatus("No saved project for this level.", true);
     auto parsed = parseProject(text.unwrap());
     if (!parsed) return setStatus("Load failed: " + parsed.error, true);
     if (mode != Mode::Idle) stopAll();
     project = std::move(parsed.value);
+    // Drop a leading release without a press (recorded by older versions).
+    std::vector<std::uint64_t> orphans;
+    std::map<int, bool> held;
+    for (auto const& e : project.sequence.events()) {
+        int key = static_cast<int>(e.button) + (e.player2 ? 8 : 0);
+        if (!e.down && !held[key]) orphans.push_back(e.id);
+        else held[key] = e.down;
+    }
+    for (auto id : orphans) project.sequence.remove(id);
     history.clear();
     selected.reset();
     selectedCircle.reset();
     m_recordTrace.clear();
     m_recordedSeq.reset();
     m_baselineVerifiedFor.reset();
-    setStatus(fmt::format("Loaded {} inputs, {} circles.", project.sequence.size(), project.circles.circles().size()));
+    inputPos.clear();
+    ++indicatorVersion;
+    setStatus(fmt::format("Loaded {} inputs. P replays them, A analyzes every input.", project.sequence.size()));
 }
 
 void Session::setGoalTick(Tick t) {
     project.goal = {Goal::Kind::SurviveUntilTick, std::max<Tick>(t, 0)};
     project.hasGoal = true;
-    setStatus(fmt::format("Goal: survive until tick {}.", project.goal.tick));
+    setStatus(fmt::format("Goal: survive until frame {}.", project.goal.tick));
 }
 
 void Session::setGoalComplete() {
@@ -586,18 +838,35 @@ void Session::setGoalComplete() {
     setStatus("Goal: complete the level.");
 }
 
+void Session::clearGoal() {
+    project.hasGoal = false;
+    setStatus(fmt::format("Goal: survive {} frames after the tested input.", cfg::integer("goal-default-ticks")));
+}
+
+Goal Session::goalFor(std::uint64_t id) const {
+    auto ev = project.sequence.find(id);
+    Tick at = ev ? ev->tick : project.sequence.lastTick();
+    if (project.hasGoal && (project.goal.kind == Goal::Kind::CompleteLevel || project.goal.tick > at + 1))
+        return project.goal;
+    Tick g = at + cfg::integer("goal-default-ticks");
+    // The recorded attempt died at deathTick: a goal past it could never pass.
+    if (deathTick && *deathTick > at) g = std::min(g, *deathTick - 1);
+    return {Goal::Kind::SurviveUntilTick, std::max(g, at + 2)};
+}
+
 Goal Session::effectiveGoal() const {
+    if (selected) return goalFor(*selected);
     if (project.hasGoal) return project.goal;
-    Tick base = project.sequence.lastTick();
-    if (selected)
-        if (auto ev = project.sequence.find(*selected)) base = ev->tick;
-    return {Goal::Kind::SurviveUntilTick, base + cfg::integer("goal-default-ticks")};
+    return {Goal::Kind::SurviveUntilTick, project.sequence.lastTick() + cfg::integer("goal-default-ticks")};
+}
+
+MeasurementSet const* Session::measurementFor(std::uint64_t id) const {
+    auto it = project.measurements.find(id);
+    return it == project.measurements.end() ? nullptr : &it->second;
 }
 
 MeasurementSet const* Session::selectedMeasurement() const {
-    if (!selected) return nullptr;
-    auto it = project.measurements.find(*selected);
-    return it == project.measurements.end() ? nullptr : &it->second;
+    return selected ? measurementFor(*selected) : nullptr;
 }
 
 std::uint64_t Session::measurementSetContext(std::uint64_t id) const {
@@ -609,21 +878,16 @@ std::uint64_t Session::measurementSetContext(std::uint64_t id) const {
 bool Session::measurementStale(std::uint64_t id) const {
     auto it = project.measurements.find(id);
     if (it == project.measurements.end()) return false;
+    if (auto ev = project.sequence.find(id); !ev) return true;
     return measurementSetContext(id) != it->second.context;
 }
 
-void Session::generateCircles() {
-    auto ms = selectedMeasurement();
-    if (!ms) return setStatus("Measure the selected input first (F5 / F6).", true);
-    CircleStyle style;
-    style.radius = static_cast<float>(cfg::real("circle-gen-radius"));
-    style.pass = cfg::toCore(cfg::rgba("color-pass"));
-    style.pass.a = 255;
-    style.fail = cfg::toCore(cfg::rgba("color-fail"));
-    style.fail.a = 255;
-    auto ids = project.circles.generateFromWindow(*selected, ms->report(), ms->offsetPositions(), style);
-    sounds::play(SoundEvent::CircleCreate);
-    setStatus(fmt::format("{} circles at the player's position for each tested timing.", ids.size()));
+void Session::refreshIndicators(bool notify_) {
+    ++indicatorVersion;
+    if (notify_) {
+        if (project.measurements.empty()) notify("No windows measured yet: A analyzes every input.", true);
+        else notify("Circle indicators refreshed.");
+    }
 }
 
 // ---------------------------------------------------------------- test engine
@@ -646,10 +910,25 @@ Session::Run Session::makeReplayRun(InputSequence const& seq, RunKind kind, std:
     return r;
 }
 
+bool Session::canTest() {
+    if (!m_layer) return false;
+    if (mode == Mode::Testing) {
+        setStatus("Already analyzing (F10 stops it).", true);
+        return false;
+    }
+    if (mode == Mode::Recording) {
+        setStatus("Stop recording first (R / F3).", true);
+        return false;
+    }
+    if (project.startTick != 0) {
+        setStatus("This recording did not start at frame 0; record again from the start.", true);
+        return false;
+    }
+    return ensureSelection();
+}
+
 void Session::testSelected() {
-    if (!m_layer || !selected) return setStatus("Select an input first.", true);
-    if (mode != Mode::Idle && mode != Mode::Playback) return setStatus("Stop recording/testing first.", true);
-    if (project.startTick != 0) return setStatus("Recording did not start at tick 0; re-record from the start.", true);
+    if (!canTest()) return;
     auto id = *selected;
     auto ev = project.sequence.find(id);
     Job job;
@@ -661,8 +940,7 @@ void Session::testSelected() {
         job.anchor = it->second.anchor;
         job.goal = it->second.goal;
     } else {
-        job.goal = project.hasGoal ? project.goal
-                                   : Goal{Goal::Kind::SurviveUntilTick, ev->tick + cfg::integer("goal-default-ticks")};
+        job.goal = goalFor(id);
     }
     job.base = project.sequence;
     if (!job.base.setTick(id, job.anchor, shiftMode)) {
@@ -670,21 +948,19 @@ void Session::testSelected() {
         job.base = project.sequence;
     }
     job.manualOffset = ev->tick - job.anchor;
+    m_queue.clear();
+    m_batch = false;
     startJob(std::move(job));
 }
 
-void Session::sweepSelected() {
-    if (!m_layer || !selected) return setStatus("Select an input first.", true);
-    if (mode != Mode::Idle && mode != Mode::Playback) return setStatus("Stop recording/testing first.", true);
-    if (project.startTick != 0) return setStatus("Recording did not start at tick 0; re-record from the start.", true);
-    auto id = *selected;
+bool Session::startSweep(std::uint64_t id, bool quiet) {
     auto ev = project.sequence.find(id);
+    if (!ev) return false;
     Job job;
     job.inputId = id;
     job.mode = shiftMode;
     job.anchor = ev->tick;
-    job.goal = project.hasGoal ? project.goal
-                               : Goal{Goal::Kind::SurviveUntilTick, ev->tick + cfg::integer("goal-default-ticks")};
+    job.goal = goalFor(id);
     job.base = project.sequence;
     auto base = std::make_shared<InputSequence>(job.base);
     auto mode_ = shiftMode;
@@ -693,15 +969,47 @@ void Session::sweepSelected() {
         auto copy = *base;
         return copy.shift(id, off, mode_).ok;
     });
+    (void)quiet;
     startJob(std::move(job));
+    return true;
+}
+
+void Session::sweepSelected() {
+    if (!canTest()) return;
+    m_queue.clear();
+    m_batch = false;
+    startSweep(*selected, false);
+}
+
+void Session::analyzeAll() {
+    if (!m_layer) return;
+    if (project.sequence.empty()) return setStatus("No inputs yet: record an attempt first (R / F3).", true);
+    if (!canTest()) return;
+    m_queue.clear();
+    bool releases = cfg::flag("analyze-releases");
+    for (auto const& e : project.sequence.events())
+        if (e.down || releases) m_queue.push_back(e.id);
+    progress.queueLeft = static_cast<int>(m_queue.size());
+    m_batch = true;
+    auto first = m_queue.front();
+    m_queue.erase(m_queue.begin());
+    startSweep(first, true);
 }
 
 void Session::startJob(Job job) {
-    if (mode == Mode::Playback) stopAll();
+    if (mode == Mode::Playback) {
+        m_run = {};
+        m_cursor.reset(nullptr);
+    }
     mode = Mode::Testing;
     paused = false;
     m_pendingSteps = 0;
-    progress = {true, "starting", 0, job.inputId};
+    progress.active = true;
+    progress.phase = "starting";
+    progress.done = 0;
+    progress.inputId = job.inputId;
+    progress.queueLeft = static_cast<int>(m_queue.size());
+    select(job.inputId, false);
     bool canCalibrate = !diag.phaseCalibrated && m_recordedSeq && m_recordTrace.size() > 0;
     job.stage = canCalibrate ? 0 : 1;
     job.tryPhase = diag.phase;
@@ -713,19 +1021,22 @@ void Session::startJob(Job job) {
 void Session::cancelTest(char const* why) {
     if (!m_job) return;
     m_job.reset();
+    m_queue.clear();
     m_run = {};
     mode = Mode::Idle;
     progress.active = false;
-    setStatus(fmt::format("Test {}.", why));
+    setStatus(fmt::format("Analysis {}.", why));
     requestReset();
 }
 
 void Session::failJob(std::string why) {
     m_job.reset();
+    m_queue.clear();
+    m_batch = false;
     m_run = {};
     mode = Mode::Idle;
     progress.active = false;
-    setStatus(std::move(why), true);
+    notify(why, true);
     sounds::play(SoundEvent::TestFail);
     requestReset();
 }
@@ -754,9 +1065,9 @@ void Session::advanceJob() {
                 diag.phase = j.tryPhase;
             } else {
                 return failJob(fmt::format(
-                    "Replay does not reproduce the recorded attempt (differs at tick {} with both injection phases). "
-                    "Re-record with 'Lock 1 physics tick per update while recording' enabled.",
-                    *div));
+                    "The replay does not reproduce your recorded attempt (it differs at frame {}). {}", *div,
+                    conflictWarning.empty() ? "Record again with 'Lock 1 physics tick per update' on."
+                                            : conflictWarning));
             }
         } else if (kind == RunKind::Baseline) {
             if (j.stage == 1) {
@@ -764,17 +1075,16 @@ void Session::advanceJob() {
                 j.baselineObs = m_run.obs;
                 j.baselineObs.desynced = diag.lateInputs > 0;
                 j.baselinePos = m_run.watchPos;
-                std::uint64_t key = fnv1a(&j.anchor, sizeof j.anchor,
-                                          measurementContext(j.base, j.inputId, j.mode, j.goal));
-                j.stage = (m_baselineVerifiedFor && *m_baselineVerifiedFor == key) ? 3 : 2;
+                std::uint64_t key = sequenceHash(j.base);
+                bool verified = m_baselineVerifiedFor && *m_baselineVerifiedFor == key;
+                j.stage = verified ? 3 : 2;
             } else {
                 auto div = firstDivergence(j.baseline, m_run.trace, kFar);
                 if (div)
-                    return failJob(fmt::format("Replay is not deterministic: two identical replays differ at tick {}. "
-                                               "No measurement can be trusted on this level/setup.",
+                    return failJob(fmt::format("The level does not replay identically twice (differs at frame {}). "
+                                               "No window on it can be trusted.",
                                                *div));
-                m_baselineVerifiedFor =
-                    fnv1a(&j.anchor, sizeof j.anchor, measurementContext(j.base, j.inputId, j.mode, j.goal));
+                m_baselineVerifiedFor = sequenceHash(j.base);
                 j.stage = 3;
             }
         } else if (kind == RunKind::Trial) {
@@ -799,7 +1109,7 @@ void Session::advanceJob() {
     // ---- start the next run
     switch (j.stage) {
         case 0: {
-            progress.phase = "calibrating replay";
+            progress.phase = "checking the replay";
             Tick end = m_recordTrace.entries().back().first;
             auto r = makeReplayRun(*m_recordedSeq, RunKind::Calibrate, 0, Goal{Goal::Kind::SurviveUntilTick, end});
             startRun(std::move(r), true);
@@ -858,8 +1168,6 @@ void Session::finishJob() {
     auto j = std::move(*m_job);
     m_job.reset();
     m_run = {};
-    mode = Mode::Idle;
-    progress.active = false;
 
     auto ctx = measurementContext(project.sequence, j.inputId, j.mode, j.goal);
     auto& ms = project.measurements[j.inputId];
@@ -871,21 +1179,46 @@ void Session::finishJob() {
     ms.context = ctx;
     for (auto const& [off, out] : j.results) ms.byTick[j.anchor + off] = out;
     for (auto const& [off, pos] : j.positions) ms.positions[j.anchor + off] = pos;
+    if (j.baselinePos) inputPos[j.inputId] = *j.baselinePos;
+    ++indicatorVersion;
 
     auto report = ms.report();
+    auto idx = project.sequence.indexOf(j.inputId);
+    std::string who = idx ? fmt::format("Input {}", *idx + 1) : std::string("Input");
+    auto baselineOk = classify(j.baselineObs, j.goal) == Outcome::Pass;
+
+    // Analyze-all: continue with the next input.
+    while (!m_queue.empty()) {
+        auto next = m_queue.front();
+        m_queue.erase(m_queue.begin());
+        if (project.sequence.find(next)) {
+            setStatus(fmt::format("{}: {}", who, report.summary()));
+            startSweep(next, true);
+            return;
+        }
+    }
+
+    mode = Mode::Idle;
+    progress.active = false;
     if (j.planner) {
         sounds::play(SoundEvent::WindowDone);
-        setStatus("Window: " + report.summary());
-        if (cfg::flag("auto-circles")) {
-            selected = j.inputId;
-            generateCircles();
-            setStatus("Window: " + report.summary());
-        }
+        if (!baselineOk)
+            notify(fmt::format("{}: the unchanged attempt itself fails before the goal (frame {}). Move the goal (G) "
+                               "earlier or fix the inputs.",
+                               who, j.goal.tick),
+                   true);
+        else if (m_batch)
+            refreshIndicators(true);
+        else
+            notify(fmt::format("{}: {}", who, report.summary()));
+        progress.queueLeft = 0;
+        m_batch = false;
     } else if (!j.results.empty()) {
         auto last = j.results.begin();
         setStatus(fmt::format("Offset {} -> {}. {}", sgn(last->first), outcomeName(last->second), report.summary()),
                   last->second != Outcome::Pass);
     }
+    save(true);
     requestReset();
 }
 

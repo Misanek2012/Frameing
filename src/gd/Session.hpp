@@ -14,6 +14,7 @@
 
 #include <Geode/Geode.hpp>
 
+#include <chrono>
 #include <optional>
 #include <string>
 
@@ -24,6 +25,8 @@ enum class Mode { Idle, Recording, Playback, Testing };
 // Whether recorded inputs are re-fired at the start or end of the physics
 // step that carries their tick. Chosen automatically by calibration.
 enum class InjectPhase : int { BeforeStep = 0, AfterStep = 1 };
+
+using Pos = std::pair<float, float>;
 
 class Session {
 public:
@@ -44,6 +47,8 @@ public:
 
     bool controlsTicks() const;          // should update() be driven by us?
     int ticksForFrame(float dt);         // how many single-tick updates to run now
+    bool fastRun() const { return m_run.fast || m_run.pauseAt.has_value(); }
+    std::chrono::steady_clock::time_point frameDeadline() const;
     double stepSize() const;             // dt of one physics step
     bool inLockedUpdate = false;
     bool injecting = false;
@@ -51,33 +56,39 @@ public:
 
     // ---------- user actions -------------------------------------------
     void toggleRecording();
-    void togglePlayback();
+    void togglePlayback();               // P: play / pause the replay
     void stopAll(char const* why = nullptr);
     void togglePause();
     void stepForward(int n = 1);
     void stepBack(int n = 1);
+    void seekTo(Tick t);                 // replay to tick t and pause there
 
     void select(std::optional<std::uint64_t> id, bool withSound = true);
     void selectNeighbour(int dir);
+    bool ensureSelection();              // auto-selects the input nearest the playhead
     void shiftSelected(Tick delta);
     void beginDrag();
     void dragTo(Tick tick);
     void endDrag();
     void deleteSelected();
+    void addClickAtPlayhead();
     void toggleShiftMode();
     void undo();
     void redo();
-    void save();
+    void save(bool quiet = false);
     void load();
 
     void setGoalTick(Tick t);
     void setGoalComplete();
+    void clearGoal();
     Goal effectiveGoal() const;
+    Goal goalFor(std::uint64_t id) const;
 
     void testSelected();   // manual mode: one trial at the input's current position
-    void sweepSelected();  // automatic mode
+    void sweepSelected();  // automatic mode, selected input
+    void analyzeAll();     // automatic mode, every press in order
     void cancelTest(char const* why = "cancelled");
-    void generateCircles();
+    void refreshIndicators(bool notify = true);
 
     // ---------- state read by the UI -------------------------------------
     Project project;
@@ -87,22 +98,34 @@ public:
     Mode mode = Mode::Idle;
     bool paused = false;
     Tick tick() const;
-    Tick runEndTick = 0; // last tick reached by the most recent run
+    Tick runEndTick = 0;  // last tick reached by the most recent run
+    std::optional<Tick> deathTick; // where the recorded attempt died
+    Tick resetTick = -1;  // last rewind / checkpoint point ("Reset @")
     std::optional<std::uint64_t> selectedCircle;
     bool circleTool = false;
-    bool followPlayhead = true;
     bool overlayVisible = true;
     bool hitboxes = true;
+    int inputsBefore(Tick t) const; // NaN-style "Input:" counter
+
+    // Player path of the last record / replay (one point per tick) and where
+    // each input fired. Drawn in level space.
+    std::vector<Pos> path;
+    Tick pathStart = 0;
+    std::map<std::uint64_t, Pos> inputPos;
+    int pathVersion = 0;
+    int indicatorVersion = 0;
 
     std::string status;
     bool statusIsError = false;
     void setStatus(std::string s, bool error = false);
+    void notify(std::string const& s, bool error = false);
 
     struct TestProgress {
         bool active = false;
         std::string phase;   // "calibrating", "baseline", "testing +3", ...
         int done = 0;
         std::uint64_t inputId = 0;
+        int queueLeft = 0;
     } progress;
 
     struct Diagnostics {
@@ -113,12 +136,13 @@ public:
         bool phaseCalibrated = false;
         bool lockedThisRun = false;
     } diag;
+    std::string conflictWarning;
 
     // Measurement for the selected input, if any (nullptr otherwise).
     MeasurementSet const* selectedMeasurement() const;
+    MeasurementSet const* measurementFor(std::uint64_t id) const;
     bool measurementStale(std::uint64_t id) const;
     std::uint64_t measurementSetContext(std::uint64_t id) const;
-    bool recordingTraceAvailable() const { return m_recordTrace.size() > 0; }
 
 private:
     Session() = default;
@@ -129,13 +153,13 @@ private:
         RunKind kind = RunKind::None;
         InputSequence sequence;          // what is injected
         Tick injectUntil = 0;            // Record: inject below this tick, record live input from it
-        std::optional<Tick> pauseAt;     // rewind target
+        std::optional<Tick> pauseAt;     // seek target
         bool fast = false;               // run at test speed
         TrialObservation obs;
         StateTrace trace;
         bool finished = false;
         std::uint64_t watchId = 0;       // input whose firing position is captured
-        std::optional<std::pair<float, float>> watchPos;
+        std::optional<Pos> watchPos;
         Tick goalTick = 0;
         bool goalComplete = false;
         Tick safetyLimit = 0;
@@ -150,7 +174,10 @@ private:
     void recordStep();
     std::uint64_t hashState() const;
     void requestReset();
-    Tick lastTickOrZero() const { return project.sequence.lastTick(); }
+    std::optional<Pos> playerPos(bool p2 = false) const;
+    void resimAfterEdit();
+    bool editable(bool quiet = false);
+    void setMusicPaused(bool p);
 
     // ----- test engine --------------------------------------------------
     struct Job {
@@ -167,24 +194,29 @@ private:
         bool triedOther = false;
         StateTrace baseline;
         TrialObservation baselineObs;
-        std::optional<std::pair<float, float>> baselinePos;
+        std::optional<Pos> baselinePos;
         std::map<Tick, Outcome> results;     // offset -> outcome
-        std::map<Tick, std::pair<float, float>> positions;
+        std::map<Tick, Pos> positions;
         int passCount = 0;
         Tick currentOffset = 0;
     };
     std::optional<Job> m_job;
+    std::vector<std::uint64_t> m_queue; // analyze-all
+    bool m_batch = false;
+    std::uint64_t m_pathSeqHash = 0;
+    bool startSweep(std::uint64_t id, bool quiet);
     void startJob(Job job);
     void advanceJob();
-    void runTrial(Tick offset);
     void finishJob();
     void failJob(std::string why);
     Run makeReplayRun(InputSequence const& seq, RunKind kind, std::uint64_t watch, Goal const& goal) const;
+    bool canTest();
 
     // ----- recording ------------------------------------------------------
     StateTrace m_recordTrace;  // trace of the recorded attempt (for calibration)
     std::optional<InputSequence> m_recordedSeq; // the inputs that produced m_recordTrace
     bool m_recordArmed = false;
+    bool m_held[2][4]{};       // live press state per player/button while recording
     std::optional<InputSequence> m_dragOrigin;
     std::optional<std::uint64_t> m_baselineVerifiedFor;
 
@@ -192,6 +224,8 @@ private:
     double m_accum = 0;
     int m_pendingSteps = 0;
     Tick m_prevStepTick = -1;
+    bool m_musicPaused = false;
+    std::chrono::steady_clock::time_point m_frameStart;
 };
 
 } // namespace fwl::gd
