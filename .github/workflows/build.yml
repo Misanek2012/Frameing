@@ -57,7 +57,7 @@ jobs:
           path: build-headercheck
           key: headercheck-${{ hashFiles('scripts/versions.env') }}
       - name: Check
-        run: scripts/header-check.sh build-headercheck
+        run: bash scripts/header-check.sh build-headercheck
 
   build-mod:
     name: Build .geode (Windows, GD 2.2081)
