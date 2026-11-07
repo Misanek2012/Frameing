@@ -1,0 +1,87 @@
+# Builds the .geode file for GD 2.2081 on GitHub's Windows runners, after
+# checking the code on Linux. Push this project to a GitHub repo; the built mod
+# appears under the run's "Artifacts". Versions are pinned in scripts/versions.env.
+name: Build Frame Window Lab
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+
+jobs:
+  core-tests:
+    name: Core unit tests (${{ matrix.stdlib }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - stdlib: libstdc++
+            cxx: g++
+            flags: ""
+          - stdlib: libc++        # same standard library family as macOS / Android
+            cxx: clang++
+            flags: "-stdlib=libc++"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain and decimal-comma locales
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang libc++-dev libc++abi-dev locales
+          sudo locale-gen cs_CZ.UTF-8 de_DE.UTF-8
+      - name: Configure & build
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S tests -B build-tests -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }} -fsanitize=address,undefined" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
+          cmake --build build-tests
+      - name: Run
+        run: |
+          ./build-tests/fwl_core_tests | tee test.log
+          # the locale test must actually run in CI, not skip
+          ! grep -q "skipped: no decimal-comma locale" test.log
+
+  header-check:
+    name: Compile + hook check vs GD 2.2081 bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang libc++-dev libc++abi-dev libgles-dev
+      - uses: actions/cache@v4
+        with:
+          path: build-headercheck
+          key: headercheck-${{ hashFiles('scripts/versions.env') }}
+      - name: Check
+        run: scripts/header-check.sh build-headercheck
+
+  build-mod:
+    name: Build .geode (Windows, GD 2.2081)
+    runs-on: windows-latest
+    needs: [core-tests, header-check]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read pinned versions
+        id: pins
+        shell: bash
+        run: grep -E '^[A-Z_]+=' scripts/versions.env >> "$GITHUB_OUTPUT"
+      - name: Build the mod
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          sdk: given          # the Geode version pinned in mod.json (5.11.2)
+          target: Win64
+          combine: true
+          # bindings@main also tracks GD 2.209+; use the verified commit.
+          bindings: geode-sdk/bindings
+          bindings-ref: ${{ steps.pins.outputs.BINDINGS_REF }}
+      - name: Combine
+        uses: geode-sdk/build-geode-mod/combine@main
+        id: build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Frame Window Lab (.geode)
+          path: ${{ steps.build.outputs.build-output }}
