@@ -465,8 +465,8 @@ void Session::select(std::optional<std::uint64_t> id, bool withSound) {
 void Session::selectNeighbour(int dir) {
     if (project.sequence.empty()) return;
     if (!selected) {
-        auto near = project.sequence.nearest(tick());
-        return select(near);
+        auto closest = project.sequence.nearest(tick());
+        return select(closest);
     }
     if (auto n = project.sequence.neighbour(*selected, dir)) select(n);
 }
