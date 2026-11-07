@@ -76,6 +76,7 @@ private:
     void onAdd(cocos2d::CCObject*);
     void onTest(cocos2d::CCObject*);
     void onAnalyze(cocos2d::CCObject*);
+    void onSlow(cocos2d::CCObject*);
 
     static Overlay* s_instance;
     PlayLayer* m_pl = nullptr;

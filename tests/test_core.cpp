@@ -446,6 +446,8 @@ TEST(project_roundtrip) {
     m.byTick = {{29, Outcome::Fail}, {30, Outcome::Pass}, {31, Outcome::Untrusted}};
     m.positions = {{29, {10.5f, 20.25f}}, {30, {11.f, 20.f}}};
     p.measurements[3] = m;
+    p.windows[1] = {Tick{8}, Tick{11}};
+    p.windows[3] = {std::nullopt, Tick{33}};
     auto text = serializeProject(p);
     auto q = parseProject(text);
     CHECK(q.ok);
@@ -459,6 +461,8 @@ TEST(project_roundtrip) {
     auto const& qm = q.value.measurements.at(3);
     CHECK(qm.anchor == 30 && qm.mode == ShiftMode::Ripple && qm.context == m.context);
     CHECK(qm.byTick == m.byTick && qm.positions == m.positions);
+    CHECK(q.value.windows == p.windows);
+    CHECK(q.value.windows.at(1).frames() == 4 && q.value.windows.at(3).frames() == 0);
     CHECK(serializeProject(q.value) == text); // stable
 }
 

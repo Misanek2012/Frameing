@@ -22,6 +22,8 @@ for f in sorted((root / "src").rglob("*.[ch]pp")):
     # keys built at runtime, e.g. "hb-" + name
     for m in re.finditer(r'std::string\("([a-z-]+)"\)\s*\+', text):
         seen.add(m.group(1) + "*")
+    for m in re.finditer(r'fmt::format\("([a-z-]+)\{\}"', text):
+        seen.add(m.group(1) + "*")
 dynamic = [k[:-1] for k in seen if k.endswith("*")]
 unused = [k for k, v in settings.items() if v["type"] != "title" and k not in seen
           and not any(k.startswith(d) for d in dynamic) and not k.startswith("sound-")]

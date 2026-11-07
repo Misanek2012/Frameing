@@ -57,6 +57,13 @@ public:
     // ---------- user actions -------------------------------------------
     void toggleRecording();
     void togglePlayback();               // P: play / pause the replay
+    void playFromReset();                // P: replay from the Reset point at showcase speed
+    void toggleShowcase();               // S: slow motion for showcases
+    void markEarliest();                 // E: selected input's current timing is the earliest that works
+    void markLatest();                   // L: ... the latest that works
+    void clearWindow();
+    bool showcase = false;
+    double playSpeed() const;
     void stopAll(char const* why = nullptr);
     void togglePause();
     void stepForward(int n = 1);
@@ -155,6 +162,7 @@ private:
         Tick injectUntil = 0;            // Record: inject below this tick, record live input from it
         std::optional<Tick> pauseAt;     // seek target
         bool fast = false;               // run at test speed
+        bool resumeAfterSeek = false;    // pauseAt: keep playing at normal speed instead of pausing
         TrialObservation obs;
         StateTrace trace;
         bool finished = false;

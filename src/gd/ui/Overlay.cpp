@@ -143,37 +143,44 @@ void LevelLayer::drawIndicators() {
             auto it = s.inputPos.find(e.id);
             if (it == s.inputPos.end()) continue;
             bool sel = s.selected && *s.selected == e.id;
-            m_draw->drawCircle({it->second.first, it->second.second}, sel ? 3.2f : 2.4f, none, sel ? 0.7f : 0.45f,
-                               sel ? rgba4(1, 1, 1, 1) : pc, 16);
+            if (e.down) // NaN: filled dot where the click happens
+                m_draw->drawCircle({it->second.first, it->second.second}, sel ? 2.4f : 1.8f, sel ? rgba4(1, 1, 1, 1) : pc,
+                                   0, none, 16);
+            else
+                m_draw->drawCircle({it->second.first, it->second.second}, 2.f, none, 0.35f, pc, 16);
         }
     }
 
-    // circle indicators: a white/black target at the input with its window size
+    // NaN's circles: a thick coloured ring with thin black outlines, centred on
+    // where the click happens, and the window size in the same colour on its left.
     if (cfg::flag("show-indicators")) {
-        for (auto const& [id, ms] : s.project.measurements) {
+        float R = static_cast<float>(cfg::real("indicator-radius"));
+        auto black = rgba4(0, 0, 0, 1);
+        for (auto const& [id, w] : s.project.windows) {
+            if (!w.complete()) continue;
             auto ev = s.project.sequence.find(id);
             if (!ev) continue;
-            std::optional<Pos> pos;
-            if (auto it = ms.positions.find(ms.anchor); it != ms.positions.end()) pos = it->second;
-            else if (auto it2 = s.inputPos.find(id); it2 != s.inputPos.end()) pos = it2->second;
-            if (!pos) continue;
-            auto w = windowCount(ms);
-            if (!w.measured) continue;
-            bool stale = s.measurementStale(id);
+            auto it = s.inputPos.find(id);
+            if (it == s.inputPos.end()) continue;
+            CCPoint c{it->second.first, it->second.second};
+            int n = static_cast<int>(std::clamp<Tick>(w.frames(), 1, 6));
+            auto rc = cfg::rgba(fmt::format("circle-color-{}", n));
+            auto ring = col(rc);
             bool sel = s.selected && *s.selected == id;
-            float a = stale ? 0.45f : 1.f;
-            CCPoint c{pos->first, pos->second};
-            float r = static_cast<float>(cfg::real("indicator-radius"));
-            m_draw->drawCircle(c, r, none, r * 0.2f, rgba4(1, 1, 1, a), 40);
-            m_draw->drawCircle(c, r * 0.62f, none, r * 0.14f, rgba4(0, 0, 0, a * 0.9f), 32);
-            m_draw->drawCircle(c, r * 0.18f, rgba4(1, 1, 1, a), 0, none, 12);
-            if (w.count == 0) m_draw->drawCircle(c, r * 1.25f, none, 0.6f, rgba4(1, 0.25f, 0.25f, a), 40);
-            if (sel) m_draw->drawCircle(c, r * 1.35f, none, 0.6f, rgba4(1, 0.85f, 0.2f, 1), 40);
+            // ring between r0 and r1 = circle at the middle with half-thickness border
+            auto band = [&](float r0, float r1, ccColor4F cc) {
+                m_draw->drawCircle(c, (r0 + r1) * 0.5f, none, (r1 - r0) * 0.5f, cc, 48);
+            };
+            band(R * 0.90f, R * 1.00f, black);
+            band(R * 0.58f, R * 0.90f, ring);
+            band(R * 0.48f, R * 0.58f, black);
+            if (sel) band(R * 1.04f, R * 1.12f, rgba4(1, 0.85f, 0.2f, 0.9f));
             auto l = label(li++);
-            l->setString(fmt::format("{}{}", w.count, w.exact ? "" : "+").c_str());
-            l->setPosition({c.x - r * 1.25f, c.y});
-            l->setOpacity(static_cast<GLubyte>(255 * a));
-            l->setColor(w.count == 0 ? ccColor3B{255, 90, 90} : ccColor3B{255, 255, 255});
+            l->setString(std::to_string(w.frames()).c_str());
+            l->setScale(R * 0.034f);
+            l->setPosition({c.x - R * 1.08f, c.y});
+            l->setOpacity(255);
+            l->setColor({rc.r, rc.g, rc.b});
         }
     }
     for (std::size_t i = li; i < m_labels.size(); ++i) m_labels[i]->setVisible(false);
@@ -251,9 +258,10 @@ bool Overlay::init(PlayLayer* pl) {
     addButton("play", "P", "GJ_button_02.png", white, menu_selector(Overlay::onPlay), true);
     addButton("back", "<", "GJ_button_01.png", yellow, menu_selector(Overlay::onStepBack), true);
     addButton("step", ">", "GJ_button_01.png", yellow, menu_selector(Overlay::onStep), true);
+    addButton("early", "E", "GJ_button_01.png", ccColor3B{120, 255, 120}, menu_selector(Overlay::onTest), true);
+    addButton("late", "L", "GJ_button_01.png", ccColor3B{120, 255, 120}, menu_selector(Overlay::onAnalyze), true);
     addButton("add", "+", "GJ_button_01.png", yellow, menu_selector(Overlay::onAdd), true);
-    addButton("test", "T", "GJ_button_01.png", yellow, menu_selector(Overlay::onTest), true);
-    addButton("analyze", "A", "GJ_button_01.png", yellow, menu_selector(Overlay::onAnalyze), true);
+    addButton("slow", "S", "GJ_button_02.png", white, menu_selector(Overlay::onSlow), true);
 
     m_level = LevelLayer::create();
     if (pl->m_objectLayer) pl->m_objectLayer->addChild(m_level, 9999);
@@ -439,6 +447,22 @@ void Overlay::redraw() {
         }
     }
 
+    // hand-marked windows: the range of frames where the click works
+    for (auto const& [id, mw] : s.project.windows) {
+        if (!mw.earliest && !mw.latest) continue;
+        bool sel = s.selected && *s.selected == id;
+        auto wc = col(cfg::rgba("color-pass"), sel ? 0.55f : 0.25f);
+        Tick lo = mw.earliest.value_or(*mw.latest), hi = mw.latest.value_or(*mw.earliest);
+        float a0 = X(static_cast<double>(lo) - 0.5), a1 = X(static_cast<double>(hi) + 0.5);
+        if (a1 < x0 || a0 > x0 + w) continue;
+        a0 = std::max(a0, x0);
+        a1 = std::min(a1, x0 + w);
+        m_draw->drawRect({a0, base}, {std::max(a1, a0 + 0.8f), base + (top - base) * 0.82f}, wc, 0, rgba4(0, 0, 0, 0));
+        auto edge = rgb255(80, 255, 110, sel ? 1.f : 0.6f);
+        if (mw.earliest) m_draw->drawSegment({a0, base}, {a0, base + (top - base) * 0.82f}, 0.35f, edge);
+        if (mw.latest) m_draw->drawSegment({a1, base}, {a1, base + (top - base) * 0.82f}, 0.35f, edge);
+    }
+
     // grid: white minor ticks, yellow labelled major ticks
     Tick minor = pick(kMinor, std::size(kMinor), m_view.pxPerTick, 4.5f);
     Tick major = pick(kMajor, std::size(kMajor), m_view.pxPerTick, 34.f, minor);
@@ -516,17 +540,14 @@ void Overlay::redraw() {
             lab->setColor(sel ? ccColor3B{255, 230, 60} : ccColor3B{170, 170, 170});
             lastLabelX = x;
         }
-        // measured window size above the box
-        if (auto ms = s.measurementFor(e.id); ms && cfg::flag("show-indicators")) {
-            auto wc = windowCount(*ms);
-            if (wc.measured && m_view.pxPerTick > 0.25) {
-                auto lab = pooled(m_indexLabels, ii++, 0.3f, {0.5f, 0.f});
-                lab->setString(fmt::format("{}{}", wc.count, wc.exact ? "" : "+").c_str());
-                lab->setPosition({x, yb + bh + 0.5f});
-                lab->setColor(s.measurementStale(e.id) ? ccColor3B{140, 140, 140}
-                              : wc.count == 0              ? ccColor3B{255, 100, 100}
-                                                           : ccColor3B{255, 255, 255});
-            }
+        // marked window size above the box, in the circle's colour
+        if (auto wit = s.project.windows.find(e.id); wit != s.project.windows.end() && wit->second.complete()) {
+            int n = static_cast<int>(std::clamp<Tick>(wit->second.frames(), 1, 6));
+            auto rc = cfg::rgba(fmt::format("circle-color-{}", n));
+            auto lab = pooled(m_indexLabels, ii++, 0.3f, {0.5f, 0.f});
+            lab->setString(std::to_string(wit->second.frames()).c_str());
+            lab->setPosition({x, yb + bh + 0.5f});
+            lab->setColor({rc.r, rc.g, rc.b});
         }
     }
     for (; ii < m_indexLabels.size(); ++ii) m_indexLabels[ii]->setVisible(false);
@@ -560,6 +581,7 @@ void Overlay::updateLabels() {
             if (s.paused) hud += "  PAUSED";
             break;
     }
+    if (s.showcase) hud += fmt::format("  [{}x]", s.playSpeed());
     if (s.shiftMode == ShiftMode::Ripple) hud += "  [ripple]";
     if (s.circleTool) hud += "  [circle tool]";
     m_hud->setString(hud.c_str());
@@ -589,10 +611,9 @@ void Overlay::updateLabels() {
             if (auto e = s.project.sequence.find(*id)) {
                 tip = fmt::format("{}: {} {} P{} @ {}", *s.project.sequence.indexOf(*id) + 1, e->down ? "+" : "-",
                                   buttonWord(e->button), e->player2 ? 2 : 1, e->tick);
-                if (auto ms = s.measurementFor(*id)) {
-                    auto wc = windowCount(*ms);
-                    if (wc.measured) tip += fmt::format("  |  window {}{}", wc.count, wc.exact ? "" : "+");
-                }
+                if (auto wit = s.project.windows.find(*id); wit != s.project.windows.end() && wit->second.complete())
+                    tip += fmt::format("  |  {}-frame window ({}..{})", wit->second.frames(), *wit->second.earliest,
+                                       *wit->second.latest);
             }
         if (auto ms = s.selectedMeasurement())
             if (auto it = ms->byTick.find(mt); it != ms->byTick.end())
@@ -617,11 +638,8 @@ void Overlay::updateButtons() {
     tint(m_left, "circle", s.circleTool);
     tint(m_left, "ci", true);
     tint(m_right, "play", s.mode == Mode::Playback && !s.paused);
-    tint(m_right, "analyze", s.mode == Mode::Testing || true);
-    tint(m_right, "back", true);
-    tint(m_right, "step", true);
-    tint(m_right, "add", true);
-    tint(m_right, "test", true);
+    tint(m_right, "slow", s.showcase);
+    for (auto k : {"back", "step", "add", "early", "late"}) tint(m_right, k, true);
 }
 
 // ------------------------------------------------------------ touches
@@ -791,9 +809,7 @@ bool Overlay::onKey(enumKeyCodes key, bool repeat, bool shift, bool ctrl, bool a
     switch (key) {
         case KEY_F2: if (!repeat) s.hitboxes = !s.hitboxes; return true;
         case KEY_F3: if (!repeat) { s.toggleRecording(); m_userView = false; } return true;
-        case KEY_F4: if (!repeat) { s.togglePlayback(); m_userView = false; } return true;
-        case KEY_F5: if (!repeat) s.testSelected(); return true;
-        case KEY_F6: if (!repeat) shift ? s.analyzeAll() : s.sweepSelected(); return true;
+        case KEY_F4: if (!repeat) { s.playFromReset(); m_userView = false; } return true;
         case KEY_F7: if (!repeat) onCircleTool(nullptr); return true;
         case KEY_F8: if (!repeat) s.refreshIndicators(); return true;
         case KEY_F9: if (!repeat) s.togglePause(); return true;
@@ -859,12 +875,9 @@ bool Overlay::onKey(enumKeyCodes key, bool repeat, bool shift, bool ctrl, bool a
             case KEY_H: s.hitboxes = !s.hitboxes; return true;
             case KEY_O: onCircleTool(nullptr); return true;
             case KEY_P: onPlay(nullptr); return true;
-            case KEY_T: s.testSelected(); return true;
-            case KEY_A:
-                if (s.mode == Mode::Testing) s.stopAll("stopped");
-                else if (shift) s.sweepSelected();
-                else s.analyzeAll();
-                return true;
+            case KEY_S: s.toggleShowcase(); return true;
+            case KEY_E: shift ? s.clearWindow() : s.markEarliest(); return true;
+            case KEY_L: shift ? s.clearWindow() : s.markLatest(); return true;
             default: break;
         }
     }
@@ -929,7 +942,7 @@ void Overlay::onCircleTool(CCObject*) {
                              : "Circle tool off.");
 }
 void Overlay::onPlay(CCObject*) {
-    Session::get().togglePlayback();
+    Session::get().playFromReset();
     m_userView = false;
 }
 void Overlay::onStepBack(CCObject*) {
@@ -941,13 +954,9 @@ void Overlay::onStep(CCObject*) {
     m_userView = false;
 }
 void Overlay::onAdd(CCObject*) { Session::get().addClickAtPlayhead(); }
-void Overlay::onTest(CCObject*) { Session::get().testSelected(); }
-void Overlay::onAnalyze(CCObject*) {
-    auto& s = Session::get();
-    if (s.mode == Mode::Testing) return s.stopAll("stopped");
-    if (CCKeyboardDispatcher::get()->getShiftKeyPressed()) s.sweepSelected();
-    else s.analyzeAll();
-}
+void Overlay::onTest(CCObject*) { Session::get().markEarliest(); }   // E button
+void Overlay::onAnalyze(CCObject*) { Session::get().markLatest(); } // L button
+void Overlay::onSlow(CCObject*) { Session::get().toggleShowcase(); }
 
 } // namespace fwl::gd
 

@@ -44,54 +44,53 @@ frames, yellow labelled ticks every 60, green boxes = presses, red = releases
 (numbered underneath), cyan bar = current frame, blue bar = "Reset @" point.
 Hover a box for `45: + Jump P1 @ 1637`. Top left shows `Frame: N, Input: M`.
 
-1. Open a level and click the **R** button (or press **F3**; the R key is GD's restart). Play until you die; the attempt is
-   recorded frame-exactly. In practice mode, dying respawns at the checkpoint
-   and recording continues from there.
-2. Press **A** (or click the A button) to measure the frame window of every click. Each click gets a
-   circle indicator in the level: a target at the spot where you clicked with
-   the window size next to it (`4` = four frames work). The number also shows
-   above the box on the timeline. **CI** (or F8) refreshes the indicators.
-3. Click a box to select it, drag it (or **←/→** while paused) to move it a
-   frame at a time. **T** (F5) tests the selected click at its new timing,
-   Shift+A (F6) measures just that click.
-4. **P** replays, **<** / **>** step one frame, click anywhere on the timeline
-   to jump to that frame, drag the cyan bar to scrub.
+You find every frame window yourself, like NaN does:
 
-The yellow line in the level is the player's path; small rings on it mark
-where each input fires.
+1. **Record:** click the **R** button (or F3) and play. Dying (or R/F3 again)
+   stops it. In practice mode you respawn at the checkpoint and keep recording.
+2. **Freeze** with **Esc** (or F9). Click the timeline just before a click to
+   jump there; that frame becomes the blue **Reset @** point.
+3. **Select the click** (click its box) and move it a frame at a time:
+   drag the box, or **←/→**. The game re-simulates right away.
+4. **P** replays from the Reset point so you can watch whether you survive.
+5. Keep moving it: at the earliest timing that still works press **E**, at
+   the latest press **L**. The window appears as a green range on the
+   timeline and as NaN's circle in the level: a coloured ring on the spot
+   where you click, with the number of frames next to it (2 = pink,
+   4 = white, 5 = green...; colours are in the settings). **C** redraws them.
+6. **Showcase:** press **S** for slow motion and **P** to replay. Every frame
+   inside a window plays a ding (1, 2, 3...), so you hear the window.
+
+The yellow line is the player's path; the dots on it are where clicks happen.
 
 ### Buttons and keys
 
 | Button | Key | Action |
 |---|---|---|
-| CI | C or F8 | Refresh circle indicators |
+| CI | C or F8 | Redraw the circles |
 | R | F3 | Record / stop recording (the R key stays GD's restart) |
 | H | H or F2 | Hitboxes on/off |
-| O | O or F7 | Circle tool (click to place, drag to size, 1-6 colour, Del removes) |
-| P | P or F4 | Play / pause the replay |
+| O | O or F7 | Free circle tool (click to place, drag to size, 1-6 colour, Del removes) |
+| P | P or F4 | Replay from the Reset point / pause |
 | < / > | , / . | Step back / forward one frame (Shift = 10) |
-| + | Insert / I | Add a click at the current frame (while paused) |
-| T | T or F5 | Test the selected click at its current timing |
-| A | A or Shift+F6 | Measure every click (Shift+A or F6: only the selected one) |
+| E | E | Selected click's current timing = earliest that works (Shift+E clears) |
+| L | L | Selected click's current timing = latest that works (Shift+L clears) |
+| + | Insert / I | Add a click at the current frame (while frozen) |
+| S | S | Showcase slow motion on/off (speed in settings) |
 | | Esc or F9 | Freeze / resume with the timeline usable (Shift+Esc = GD pause menu) |
 | | F10 | Stop |
 | | F1 | Hide / show everything |
 | | [ / ] | Select previous / next input |
 
-While paused (or after clicking the timeline): ←/→ move the selected input
+While frozen (or after clicking the timeline): ←/→ move the selected input
 (Shift = 10 frames, Ctrl = move every later input too), ↑/↓ select, Del
-deletes the click, G sets the goal to the current frame (Shift+G = complete the
-level, Ctrl+G = automatic), M toggles ripple, F fits the whole attempt,
-Home/End jump to the start / last input. Mouse wheel zooms the timeline
-(Shift+wheel scrolls). Ctrl+Z/Ctrl+Y undo/redo, Ctrl+S saves.
-
-The goal decides what "works" means: by default a timing works if the player
-survives 240 frames (1 s) after the click, capped just before where your
-recorded attempt died.
+deletes the click, M toggles ripple, F fits the whole attempt, Home/End jump
+to the start / last input. Mouse wheel zooms the timeline (Shift+wheel
+scrolls). Ctrl+Z/Ctrl+Y undo/redo, Ctrl+S saves. In platformer levels the
+letter keys only work while frozen (A/D move the player there).
 
 **Click Between Frames** moves clicks between physics frames. Keep its
-"Disable CBF" setting on while measuring, or windows can't be reproduced exactly.
-In platformer levels the letter keys only work while frozen (A/D move the player).
+"Disable CBF" setting on while recording, or replays won't match.
 
 ## Building
 

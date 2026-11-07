@@ -229,6 +229,8 @@ void Session::onReset() {
             m_recordArmed = false;
             project.startTick = 0;
             project.measurements.clear(); // old measurements refer to a different attempt
+            for (auto it = project.windows.begin(); it != project.windows.end();)
+                it = project.sequence.find(it->first) ? std::next(it) : project.windows.erase(it);
             ++indicatorVersion;
             deathTick.reset();
         } else {
@@ -289,7 +291,7 @@ int Session::ticksForFrame(float dt) {
     breakLoop = false;
     m_frameStart = std::chrono::steady_clock::now();
     bool testing = mode == Mode::Testing;
-    setMusicPaused(paused || fastRun() || testing);
+    setMusicPaused(paused || fastRun() || testing || (mode == Mode::Playback && playSpeed() != 1.0));
     if (testing && (m_run.finished || m_run.kind == RunKind::None)) return 0;
     if (paused) {
         int n = m_pendingSteps;
@@ -298,7 +300,7 @@ int Session::ticksForFrame(float dt) {
     }
     if (fastRun()) return 1'000'000; // bounded by frameDeadline()
     double step = stepSize();
-    m_accum += std::min<double>(dt, 0.25);
+    m_accum += std::min<double>(dt, 0.25) * (mode == Mode::Playback ? playSpeed() : 1.0);
     int n = static_cast<int>(m_accum / step);
     m_accum -= n * step;
     if (n > 64) {
@@ -344,9 +346,24 @@ void Session::onAfterStep() {
     if (m_run.pauseAt && t >= *m_run.pauseAt) {
         m_run.pauseAt.reset();
         m_run.fast = false;
-        paused = true;
         breakLoop = true;
-        setStatus(fmt::format("Frame {}. '.' / '>' steps forward, ',' / '<' steps back.", t));
+        m_accum = 0;
+        if (m_run.resumeAfterSeek) {
+            m_run.resumeAfterSeek = false;
+        } else {
+            paused = true;
+            setStatus(fmt::format("Frame {}. '.' / '>' steps forward, ',' / '<' steps back.", t));
+        }
+    }
+
+    // Showcase dings: every frame inside a marked window plays ding 1, 2, 3...
+    if (m_run.kind == RunKind::Play && !fastRun() && cfg::flag("window-dings")) {
+        for (auto const& [id, w] : project.windows) {
+            if (!w.complete() || t < *w.earliest || t > *w.latest) continue;
+            if (!project.sequence.find(id)) continue;
+            sounds::ding(static_cast<int>(std::min<Tick>(t - *w.earliest + 1, 6)));
+            break;
+        }
     }
 
     bool testRun = m_run.kind == RunKind::Calibrate || m_run.kind == RunKind::Baseline || m_run.kind == RunKind::Trial;
@@ -560,6 +577,71 @@ void Session::togglePlayback() {
     setStatus(project.sequence.empty() ? "Replaying (no inputs recorded yet)." : "Replaying the inputs.");
 }
 
+double Session::playSpeed() const {
+    return showcase ? std::clamp(cfg::real("showcase-speed"), 0.01, 1.0) : 1.0;
+}
+
+void Session::toggleShowcase() {
+    showcase = !showcase;
+    setStatus(showcase ? fmt::format("Showcase speed {}x: replays run in slow motion; windows ding frame by frame.",
+                                     playSpeed())
+                       : "Normal speed.");
+}
+
+void Session::playFromReset() {
+    if (!m_layer) return;
+    if (mode == Mode::Testing) return setStatus("Analysis running (F10 stops it).", true);
+    if (mode == Mode::Playback && !paused) return togglePause();
+    if (mode == Mode::Recording) stopAll();
+    Tick from = std::max<Tick>(0, resetTick);
+    auto r = makeReplayRun(project.sequence, RunKind::Play, 0, Goal{Goal::Kind::SurviveUntilTick, kFar});
+    r.fast = false;
+    if (from > 0) {
+        r.pauseAt = from;
+        r.fast = true;
+        r.resumeAfterSeek = true;
+    }
+    mode = Mode::Playback;
+    paused = false;
+    startRun(std::move(r), true);
+    setStatus(from > 0 ? fmt::format("Replaying from Reset @ {}.", from) : "Replaying from the start.");
+}
+
+void Session::markEarliest() {
+    if (!ensureSelection()) return;
+    auto ev = project.sequence.find(*selected);
+    auto& w = project.windows[*selected];
+    w.earliest = ev->tick;
+    if (w.latest && *w.latest < ev->tick) w.latest.reset();
+    ++indicatorVersion;
+    sounds::ding(1);
+    auto idx = *project.sequence.indexOf(*selected) + 1;
+    setStatus(w.complete() ? fmt::format("Input {}: {}-frame window ({} .. {}).", idx, w.frames(), *w.earliest, *w.latest)
+                           : fmt::format("Input {}: earliest working frame {}. Now find the latest and press L.", idx,
+                                         ev->tick));
+}
+
+void Session::markLatest() {
+    if (!ensureSelection()) return;
+    auto ev = project.sequence.find(*selected);
+    auto& w = project.windows[*selected];
+    w.latest = ev->tick;
+    if (w.earliest && *w.earliest > ev->tick) w.earliest.reset();
+    ++indicatorVersion;
+    sounds::ding(static_cast<int>(std::clamp<Tick>(w.frames(), 1, 6)));
+    auto idx = *project.sequence.indexOf(*selected) + 1;
+    setStatus(w.complete() ? fmt::format("Input {}: {}-frame window ({} .. {}).", idx, w.frames(), *w.earliest, *w.latest)
+                           : fmt::format("Input {}: latest working frame {}. Now find the earliest and press E.", idx,
+                                         ev->tick));
+}
+
+void Session::clearWindow() {
+    if (!selected) return;
+    project.windows.erase(*selected);
+    ++indicatorVersion;
+    setStatus("Window cleared for the selected input.");
+}
+
 void Session::togglePause() {
     if (!m_layer || mode == Mode::Testing) return;
     paused = !paused;
@@ -731,6 +813,9 @@ void Session::deleteSelected() {
     auto id = *selected;
     auto st = history.apply(project.sequence, [&](InputSequence& s) { return s.removeWithPartner(id); });
     if (!st) return setStatus(st.error, true);
+    for (auto it = project.windows.begin(); it != project.windows.end();)
+        it = project.sequence.find(it->first) ? std::next(it) : project.windows.erase(it);
+    ++indicatorVersion;
     selected.reset();
     setStatus("Click deleted (press and its release). Ctrl+Z undoes it.");
     resimAfterEdit();
@@ -987,7 +1072,7 @@ void Session::analyzeAll() {
     if (project.sequence.empty()) return setStatus("No inputs yet: record an attempt first (R / F3).", true);
     if (!canTest()) return;
     m_queue.clear();
-    bool releases = cfg::flag("analyze-releases");
+    bool releases = false; // presses only
     for (auto const& e : project.sequence.events())
         if (e.down || releases) m_queue.push_back(e.id);
     progress.queueLeft = static_cast<int>(m_queue.size());

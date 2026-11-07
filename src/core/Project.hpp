@@ -127,6 +127,15 @@ struct Project {
     Goal goal{Goal::Kind::SurviveUntilTick, 0};
     bool hasGoal = false;
     std::map<std::uint64_t, MeasurementSet> measurements; // per input id
+    // Frame windows marked by hand: input id -> earliest / latest working tick
+    // (absolute). Either bound may be missing while the user is still looking.
+    struct MarkedWindow {
+        std::optional<Tick> earliest, latest;
+        bool complete() const { return earliest && latest && *latest >= *earliest; }
+        Tick frames() const { return complete() ? *latest - *earliest + 1 : 0; }
+        bool operator==(MarkedWindow const&) const = default;
+    };
+    std::map<std::uint64_t, MarkedWindow> windows;
 };
 
 std::string serializeProject(Project const& p);

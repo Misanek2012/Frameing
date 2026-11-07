@@ -53,6 +53,23 @@
             "description": "After moving, adding or deleting an input while paused, replay to the current frame so the path and player show the edited inputs.",
             "default": true
         },
+        "showcase-speed": {
+            "type": "float",
+            "name": "Showcase speed (S)",
+            "description": "Replay speed in showcase mode, so each frame of a window gets its own ding.",
+            "default": 0.1,
+            "min": 0.01,
+            "max": 1,
+            "control": {
+                "slider": true,
+                "slider-step": 0.01
+            }
+        },
+        "window-dings": {
+            "type": "bool",
+            "name": "Ding on each frame of a marked window during replays",
+            "default": true
+        },
         "sweep-radius": {
             "type": "int",
             "name": "Sweep initial radius (ticks)",
@@ -66,12 +83,6 @@
             "default": 240,
             "min": 1,
             "max": 2400
-        },
-        "analyze-releases": {
-            "type": "bool",
-            "name": "Analyze releases too (A)",
-            "description": "When off, A measures every press; releases can still be measured one by one (F6).",
-            "default": false
         },
         "goal-default-ticks": {
             "type": "int",
@@ -300,18 +311,78 @@
         },
         "show-indicators": {
             "type": "bool",
-            "name": "Show circle indicators (window size at each click)",
+            "name": "Show circles (window size at each click)",
             "default": true
         },
         "indicator-radius": {
             "type": "float",
-            "name": "Circle indicator size",
-            "default": 9,
+            "name": "Circle size",
+            "default": 14,
             "min": 3,
             "max": 30,
             "control": {
                 "slider": true
             }
+        },
+        "circle-color-1": {
+            "type": "rgba",
+            "name": "Circle colour: 1-frame window",
+            "default": [
+                255,
+                80,
+                80,
+                255
+            ]
+        },
+        "circle-color-2": {
+            "type": "rgba",
+            "name": "Circle colour: 2-frame window",
+            "default": [
+                240,
+                165,
+                240,
+                255
+            ]
+        },
+        "circle-color-3": {
+            "type": "rgba",
+            "name": "Circle colour: 3-frame window",
+            "default": [
+                255,
+                205,
+                60,
+                255
+            ]
+        },
+        "circle-color-4": {
+            "type": "rgba",
+            "name": "Circle colour: 4-frame window",
+            "default": [
+                255,
+                255,
+                255,
+                255
+            ]
+        },
+        "circle-color-5": {
+            "type": "rgba",
+            "name": "Circle colour: 5-frame window",
+            "default": [
+                60,
+                235,
+                60,
+                255
+            ]
+        },
+        "circle-color-6": {
+            "type": "rgba",
+            "name": "Circle colour: 6+-frame window",
+            "default": [
+                80,
+                220,
+                255,
+                255
+            ]
         },
         "circle-radius": {
             "type": "float",

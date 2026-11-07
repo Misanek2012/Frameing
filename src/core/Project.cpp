@@ -273,6 +273,11 @@ std::string serializeProject(Project const& p) {
            << (c.linkedOffset ? std::to_string(*c.linkedOffset) : "-") << ' '
            << (c.linkedOutcome ? outcomeName(*c.linkedOutcome) : "-") << '\n';
     }
+    for (auto const& [id, w] : p.windows) {
+        if (!w.earliest && !w.latest) continue;
+        os << "window " << id << ' ' << (w.earliest ? std::to_string(*w.earliest) : "-") << ' '
+           << (w.latest ? std::to_string(*w.latest) : "-") << '\n';
+    }
     for (auto const& [id, m] : p.measurements) {
         os << "mset " << id << ' ' << m.anchor << ' ' << (m.mode == ShiftMode::Ripple ? "ripple" : "single") << ' '
            << (m.goal.kind == Goal::Kind::CompleteLevel ? "complete" : "survive") << ' ' << m.goal.tick << ' '
@@ -368,6 +373,17 @@ Expected<Project> parseProject(std::string_view text) {
                 c.linkedOutcome = o;
             }
             if (auto st = p.circles.insertWithId(c); !st) return err(st.error);
+        } else if (t[0] == "window") {
+            std::uint64_t id;
+            if (t.size() != 4 || !parseInt(t[1], id)) return err("bad window line");
+            Project::MarkedWindow w;
+            for (int k = 0; k < 2; ++k) {
+                if (t[2 + k] == "-") continue;
+                Tick v;
+                if (!parseInt(t[2 + k], v)) return err("bad window tick");
+                (k == 0 ? w.earliest : w.latest) = v;
+            }
+            p.windows[id] = w;
         } else if (t[0] == "mset") {
             std::uint64_t id;
             MeasurementSet m;
