@@ -1,0 +1,109 @@
+{
+    "geode": "5.11.2",
+    "gd": {
+        "win": "2.2081"
+    },
+    "id": "fwlab.frame-window-lab",
+    "name": "Frame Window Lab",
+    "version": "v0.1.0",
+    "developer": "FrameWindowLab",
+    "description": "Tick-exact input recording, frame stepping, input shifting and measured frame windows with hitboxes and marker circles.",
+    "resources": {
+        "files": [
+            "resources/sounds/*.mp3"
+        ]
+    },
+    "settings": {
+        "title-general": { "type": "title", "name": "General" },
+        "show-overlay": {
+            "type": "bool", "name": "Show overlay on level start", "default": true
+        },
+        "lock-ticks-recording": {
+            "type": "bool", "name": "Lock 1 physics tick per update while recording",
+            "description": "Runs exactly one physics tick per update call (real-time speed, FPS-independent). Required for replays to reproduce recordings reliably.",
+            "default": true
+        },
+        "test-ticks-per-frame": {
+            "type": "int", "name": "Test speed (ticks per rendered frame)",
+            "description": "How many physics ticks are simulated per rendered frame during automatic tests and rewinds.",
+            "default": 16, "min": 1, "max": 64,
+            "control": { "slider": true, "arrows": true }
+        },
+        "sweep-radius": {
+            "type": "int", "name": "Sweep initial radius (ticks)", "default": 12, "min": 1, "max": 240
+        },
+        "sweep-max-radius": {
+            "type": "int", "name": "Sweep maximum radius (ticks)", "default": 240, "min": 1, "max": 2400
+        },
+        "goal-default-ticks": {
+            "type": "int", "name": "Default goal: ticks after selected input",
+            "description": "Used when no goal marker is set (G on the timeline).",
+            "default": 240, "min": 1, "max": 24000
+        },
+        "auto-circles": {
+            "type": "bool", "name": "Generate circles after a sweep", "default": true
+        },
+        "title-timeline": { "type": "title", "name": "Timeline" },
+        "timeline-height": {
+            "type": "float", "name": "Timeline height", "default": 46, "min": 24, "max": 140,
+            "control": { "slider": true }
+        },
+        "timeline-opacity": {
+            "type": "float", "name": "Timeline background opacity", "default": 0.35, "min": 0, "max": 1,
+            "control": { "slider": true, "slider-step": 0.05 }
+        },
+        "color-press": { "type": "rgba", "name": "Press marker", "default": [70, 255, 90, 255] },
+        "color-release": { "type": "rgba", "name": "Release marker", "default": [255, 70, 70, 255] },
+        "color-pass": { "type": "rgba", "name": "Passing tick", "default": [60, 255, 110, 150] },
+        "color-fail": { "type": "rgba", "name": "Failing tick", "default": [255, 60, 70, 120] },
+        "color-goal": { "type": "rgba", "name": "Goal marker", "default": [80, 200, 255, 255] },
+        "color-playhead": { "type": "rgba", "name": "Current tick", "default": [255, 255, 255, 255] },
+        "title-hitboxes": { "type": "title", "name": "Hitboxes" },
+        "hitboxes": { "type": "bool", "name": "Show hitboxes", "default": true },
+        "hb-player": { "type": "bool", "name": "Player", "default": true },
+        "hb-hazard": { "type": "bool", "name": "Hazards (spikes, saws)", "default": true },
+        "hb-solid": { "type": "bool", "name": "Solids", "default": true },
+        "hb-special": { "type": "bool", "name": "Orbs, pads, portals, triggers", "default": true },
+        "hb-other": { "type": "bool", "name": "Unclassified", "default": true },
+        "hb-color-player": { "type": "rgba", "name": "Player colour", "default": [255, 255, 0, 255] },
+        "hb-color-hazard": { "type": "rgba", "name": "Hazard colour", "default": [255, 40, 40, 255] },
+        "hb-color-solid": { "type": "rgba", "name": "Solid colour", "default": [40, 120, 255, 255] },
+        "hb-color-special": { "type": "rgba", "name": "Special colour", "default": [40, 255, 120, 255] },
+        "hb-color-other": { "type": "rgba", "name": "Unclassified colour", "default": [255, 255, 255, 200] },
+        "hb-thickness": {
+            "type": "float", "name": "Outline thickness", "default": 0.5, "min": 0.1, "max": 4,
+            "control": { "slider": true, "slider-step": 0.1 }
+        },
+        "hb-fill": {
+            "type": "float", "name": "Fill opacity", "default": 0.12, "min": 0, "max": 1,
+            "control": { "slider": true, "slider-step": 0.02 }
+        },
+        "title-circles": { "type": "title", "name": "Circles" },
+        "circle-radius": { "type": "float", "name": "New circle radius", "default": 14, "min": 2, "max": 200 },
+        "circle-thickness": { "type": "float", "name": "New circle outline", "default": 2, "min": 0.5, "max": 12 },
+        "circle-fill": {
+            "type": "float", "name": "New circle fill opacity", "default": 0.15, "min": 0, "max": 1,
+            "control": { "slider": true, "slider-step": 0.05 }
+        },
+        "circle-color": { "type": "rgba", "name": "New circle colour", "default": [255, 200, 40, 255] },
+        "circle-gen-radius": { "type": "float", "name": "Generated circle radius", "default": 5, "min": 1, "max": 50 },
+        "title-sound": { "type": "title", "name": "Sound" },
+        "sound-enabled": { "type": "bool", "name": "Enable sounds", "default": true },
+        "sound-volume": {
+            "type": "float", "name": "Volume", "default": 0.6, "min": 0, "max": 1,
+            "control": { "slider": true, "slider-step": 0.05 }
+        },
+        "sound-count": {
+            "type": "bool", "name": "Rising count dings during sweeps",
+            "description": "Each passing tick of a sweep plays the next higher ding (1-6).",
+            "default": true
+        },
+        "sound-step": { "type": "int", "name": "Ding for tick step (0 = off)", "default": 0, "min": 0, "max": 6 },
+        "sound-select": { "type": "int", "name": "Ding for selecting input", "default": 2, "min": 0, "max": 6 },
+        "sound-move": { "type": "int", "name": "Ding for moving input", "default": 1, "min": 0, "max": 6 },
+        "sound-circle": { "type": "int", "name": "Ding for creating circle", "default": 3, "min": 0, "max": 6 },
+        "sound-pass": { "type": "int", "name": "Ding for passing test", "default": 6, "min": 0, "max": 6 },
+        "sound-fail": { "type": "int", "name": "Ding for failing test", "default": 1, "min": 0, "max": 6 },
+        "sound-done": { "type": "int", "name": "Ding for sweep finished", "default": 5, "min": 0, "max": 6 }
+    }
+}
