@@ -119,6 +119,8 @@ public:
     std::vector<Pos> path;
     Tick pathStart = 0;
     std::map<std::uint64_t, Pos> inputPos;
+    std::map<std::uint64_t, std::chrono::steady_clock::time_point> markerSpawn; // showcase pop animation
+    bool showcasing() const { return mode == Mode::Playback && !paused; }
     int pathVersion = 0;
     int indicatorVersion = 0;
 

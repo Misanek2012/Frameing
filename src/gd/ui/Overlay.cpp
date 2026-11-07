@@ -157,13 +157,24 @@ void LevelLayer::drawIndicators() {
     if (cfg::flag("show-indicators")) {
         float R = static_cast<float>(cfg::real("indicator-radius"));
         auto black = rgba4(0, 0, 0, 1);
+        Tick now = s.tick();
+        auto clock = std::chrono::steady_clock::now();
         for (auto const& [id, w] : s.project.windows) {
             if (!w.complete()) continue;
             auto ev = s.project.sequence.find(id);
             if (!ev) continue;
+            // during a replay circles appear as their click happens (NaN's showcase)
+            if (s.showcasing() && ev->tick > now) continue;
             auto it = s.inputPos.find(id);
             if (it == s.inputPos.end()) continue;
             CCPoint c{it->second.first, it->second.second};
+            float pop = 1.f;
+            if (auto sp = s.markerSpawn.find(id); sp != s.markerSpawn.end()) {
+                float age = std::chrono::duration<float>(clock - sp->second).count();
+                if (age >= 0.f && age < 0.2f) pop = 1.f + 0.35f * (1.f - age / 0.2f);
+            }
+            float Rb = R;
+            float R = Rb * pop;
             int n = static_cast<int>(std::clamp<Tick>(w.frames(), 1, 6));
             auto rc = cfg::rgba(fmt::format("circle-color-{}", n));
             auto ring = col(rc);
@@ -179,6 +190,7 @@ void LevelLayer::drawIndicators() {
             auto l = label(li++);
             l->setString(std::to_string(w.frames()).c_str());
             l->setScale(R * 0.034f);
+            (void)Rb;
             l->setPosition({c.x - R * 1.08f, c.y});
             l->setOpacity(255);
             l->setColor({rc.r, rc.g, rc.b});
@@ -614,6 +626,50 @@ void Overlay::updateLabels() {
     if (s.circleTool) hud += "  [circle tool]";
     m_hud->setString(hud.c_str());
     m_hud->setColor(s.mode == Mode::Recording ? ccColor3B{255, 120, 120} : ccColor3B{255, 255, 255});
+
+    // NaN's tally: how many clicks of each window size have passed so far
+    {
+        std::map<Tick, int> counts;
+        if (cfg::flag("show-tally"))
+            for (auto const& [id, w] : s.project.windows)
+                if (w.complete())
+                    if (auto ev = s.project.sequence.find(id); ev && ev->tick <= t) ++counts[w.frames()];
+        std::size_t i = 0;
+        auto win = CCDirector::get()->getWinSize();
+        for (auto const& [frames, n] : counts) {
+            while (m_tally.size() <= i) {
+                auto l = CCLabelBMFont::create("", "bigFont.fnt");
+                l->setAnchorPoint({0, 1});
+                l->setScale(0.38f);
+                addChild(l, 2);
+                m_tally.push_back(l);
+                m_tallyCounts.push_back(-1);
+            }
+            auto l = m_tally[i];
+            int idx = static_cast<int>(std::clamp<Tick>(frames, 1, 6));
+            auto rc = cfg::rgba(fmt::format("circle-color-{}", idx));
+            l->setString(fmt::format("{} Frame{}: {}", frames, frames == 1 ? "" : "s", n).c_str());
+            l->setPosition({4.f, win.height - 36.f - static_cast<float>(i) * 11.f});
+            l->setVisible(true);
+            if (m_tallyCounts[i] >= 0 && n > m_tallyCounts[i] && s.showcasing()) { // pop like NaN's counter
+                l->stopAllActions();
+                l->setScale(0.38f);
+                l->setColor({255, 255, 255});
+                l->runAction(CCSequence::create(CCEaseSineOut::create(CCScaleTo::create(0.06f, 0.46f)),
+                                                CCEaseSineOut::create(CCScaleTo::create(0.2f, 0.38f)), nullptr));
+                l->runAction(CCSequence::create(CCDelayTime::create(0.06f),
+                                                CCEaseSineOut::create(CCTintTo::create(0.2f, rc.r, rc.g, rc.b)), nullptr));
+            } else if (l->numberOfRunningActions() == 0) {
+                l->setColor({rc.r, rc.g, rc.b});
+            }
+            m_tallyCounts[i] = n;
+            ++i;
+        }
+        for (; i < m_tally.size(); ++i) {
+            m_tally[i]->setVisible(false);
+            m_tallyCounts[i] = -1;
+        }
+    }
 
     m_status->setString(s.status.c_str());
     m_status->setColor(s.statusIsError ? ccColor3B{255, 120, 120} : ccColor3B{210, 210, 210});

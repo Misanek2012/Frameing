@@ -58,8 +58,11 @@ You find every frame window yourself, like NaN does:
    timeline and as NaN's circle in the level: a coloured ring on the spot
    where you click, with the number of frames next to it (2 = pink,
    4 = white, 5 = green...; colours are in the settings). **C** redraws them.
-6. **Showcase:** press **S** for slow motion and **P** to replay. Every frame
-   inside a window plays a ding (1, 2, 3...), so you hear the window.
+6. **Showcase (like NaN's counter videos):** press **P** to replay. Each
+   marked click pops its circle on the spot as it happens and plays the ding
+   for its window size (1-frame window = ding 1 ... 6 or more = ding 6). The
+   top left keeps a tally like NaN's ("1 Frame: 3", "2 Frames: 5"...).
+   **S** toggles slow motion.
 
 The yellow line is the player's path; the dots on it are where clicks happen.
 
@@ -76,7 +79,7 @@ The yellow line is the player's path; the dots on it are where clicks happen.
 | E | E | Selected click's current timing = earliest that works (Shift+E clears) |
 | L | L | Selected click's current timing = latest that works (Shift+L clears) |
 | + | Insert / I | Add a click at the current frame (while frozen) |
-| S | S | Showcase slow motion on/off (speed in settings) |
+| S | S | Slow motion on/off (speed in settings) |
 | | Esc or F9 | Freeze / resume with the timeline usable (Shift+Esc = GD pause menu) |
 | | F10 | Stop |
 | | F1 | Hide / show everything |

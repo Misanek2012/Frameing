@@ -92,6 +92,8 @@ private:
     cocos2d::CCLabelBMFont* m_goalLabel = nullptr;
     std::vector<cocos2d::CCLabelBMFont*> m_tickLabels;
     std::vector<cocos2d::CCLabelBMFont*> m_indexLabels;
+    std::vector<cocos2d::CCLabelBMFont*> m_tally;
+    std::vector<int> m_tallyCounts;
     cocos2d::CCMenu* m_menu = nullptr;
     std::vector<std::pair<std::string, CCMenuItemSpriteExtra*>> m_left, m_right;
     LevelLayer* m_level = nullptr;

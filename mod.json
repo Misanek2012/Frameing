@@ -56,8 +56,8 @@
         "showcase-speed": {
             "type": "float",
             "name": "Showcase speed (S)",
-            "description": "Replay speed in showcase mode, so each frame of a window gets its own ding.",
-            "default": 0.1,
+            "description": "Replay speed in showcase mode (S).",
+            "default": 0.5,
             "min": 0.01,
             "max": 1,
             "control": {
@@ -67,8 +67,9 @@
         },
         "window-dings": {
             "type": "bool",
-            "name": "Ding on each frame of a marked window during replays",
-            "default": true
+            "name": "Ding for each click with a marked window during replays",
+            "default": true,
+            "description": "The ding number is the window size: 1-frame window = ding 1 ... 6 or more frames = ding 6, like NaN's showcases."
         },
         "sweep-radius": {
             "type": "int",
@@ -312,6 +313,12 @@
         "show-indicators": {
             "type": "bool",
             "name": "Show circles (window size at each click)",
+            "default": true
+        },
+        "show-tally": {
+            "type": "bool",
+            "name": "Show the window tally (top left)",
+            "description": "Counts how many clicks of each window size have passed, like NaN's counter.",
             "default": true
         },
         "indicator-radius": {

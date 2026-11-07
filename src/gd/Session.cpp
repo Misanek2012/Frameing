@@ -356,16 +356,6 @@ void Session::onAfterStep() {
         }
     }
 
-    // Showcase dings: every frame inside a marked window plays ding 1, 2, 3...
-    if (m_run.kind == RunKind::Play && !fastRun() && cfg::flag("window-dings")) {
-        for (auto const& [id, w] : project.windows) {
-            if (!w.complete() || t < *w.earliest || t > *w.latest) continue;
-            if (!project.sequence.find(id)) continue;
-            sounds::ding(static_cast<int>(std::min<Tick>(t - *w.earliest + 1, 6)));
-            break;
-        }
-    }
-
     bool testRun = m_run.kind == RunKind::Calibrate || m_run.kind == RunKind::Baseline || m_run.kind == RunKind::Trial;
     if (testRun && !m_run.finished) {
         if (!m_run.goalComplete && t >= m_run.goalTick) {
@@ -395,6 +385,14 @@ void Session::fireDue() {
         auto pos = playerPos(e.player2);
         if (e.id == m_run.watchId && pos) m_run.watchPos = pos;
         if (keepPos && pos) inputPos[e.id] = *pos;
+        // NaN's showcase: a click with a marked window pops its circle and plays
+        // the ding for its window size (1 frame = ding 1 ... 6+ frames = ding 6).
+        if (m_run.kind == RunKind::Play && !fastRun()) {
+            if (auto w = project.windows.find(e.id); w != project.windows.end() && w->second.complete()) {
+                markerSpawn[e.id] = std::chrono::steady_clock::now();
+                if (cfg::flag("window-dings")) sounds::ding(static_cast<int>(std::clamp<Tick>(w->second.frames(), 1, 6)));
+            }
+        }
         injecting = true;
         m_layer->handleButton(e.down, static_cast<int>(e.button), !e.player2);
         injecting = false;
