@@ -63,6 +63,8 @@ jobs:
     name: Build .geode (Windows, GD 2.2081)
     runs-on: windows-latest
     needs: [core-tests, header-check]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Read pinned versions
@@ -81,3 +83,20 @@ jobs:
         with:
           name: Frame Window Lab (.geode)
           path: ${{ steps.build.outputs.build-output }}
+      - name: Publish to the builds branch
+        shell: bash
+        env:
+          OUT: ${{ steps.build.outputs.build-output }}
+        run: |
+          set -e
+          file=$(find "$OUT" -name '*.geode' | head -1)
+          sha=$(git rev-parse --short HEAD)
+          mkdir -p /tmp/pub && cp "$file" /tmp/pub/fwlab.frame-window-lab.geode
+          echo "$sha" > /tmp/pub/COMMIT
+          cd /tmp/pub
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout -q -b builds
+          git add -A && git commit -q -m "Build of $sha"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" builds
