@@ -39,44 +39,58 @@ traces match, so it only measures levels that replay deterministically.
 
 ## Using it
 
-1. Open a level. Press **F3** to record and play the section you care about.
-2. Set a goal: **G** = current tick, **Shift+G** = level completion, or
-   **Alt+click** on the timeline.
-3. Select an input on the timeline and press **F6** to sweep it. The timeline
-   shows the result band and the passing window.
-4. **F8** places circles at the player's position for each tested offset.
+The timeline at the bottom works like NaN's counter: white ticks every 10
+frames, yellow labelled ticks every 60, green boxes = presses, red = releases
+(numbered underneath), cyan bar = current frame, blue bar = "Reset @" point.
+Hover a box for `45: + Jump P1 @ 1637`. Top left shows `Frame: N, Input: M`.
 
-### Keys
+1. Open a level and press **R** (or F3). Play until you die; the attempt is
+   recorded frame-exactly. In practice mode, dying respawns at the checkpoint
+   and recording continues from there.
+2. Press **A** to measure the frame window of every click. Each click gets a
+   circle indicator in the level: a target at the spot where you clicked with
+   the window size next to it (`4` = four frames work). The number also shows
+   above the box on the timeline. **CI** (or F8) refreshes the indicators.
+3. Click a box to select it, drag it (or **←/→** while paused) to move it a
+   frame at a time. **T** (F5) tests the selected click at its new timing,
+   Shift+A (F6) measures just that click.
+4. **P** replays, **<** / **>** step one frame, click anywhere on the timeline
+   to jump to that frame, drag the cyan bar to scrub.
 
-| Key | Action |
-|---|---|
-| F1 | Toggle overlay |
-| F2 | Toggle hitboxes |
-| F3 | Record |
-| F4 | Replay |
-| F5 | Manual test of the selected input |
-| F6 | Sweep the selected input |
-| F7 | Circle tool |
-| F8 | Generate circles from the last measurement |
-| F9 / F10 | Pause / stop |
-| `.` / `,` | Step one tick forward / back (Shift = 10) |
-| ← / → | Move selected input one tick |
-| M | Toggle ripple (later inputs move with the selected one) |
-| G, Shift+G, Alt+click | Set goal |
-| Ctrl+Z / Ctrl+Y | Undo / redo |
-| Ctrl+S / Ctrl+O | Save / load project |
-| 1–6, Q/E, Z/X | Circle colour, thickness, fill |
-| H / Shift+H | Hide circle / show all |
-| L | Link circle to the selected input |
-| Del | Delete selection |
+The yellow line in the level is the player's path; small rings on it mark
+where each input fires.
 
-Mouse: drag markers to move inputs, drag empty timeline to pan, scroll to zoom
-(Shift+scroll pans). With the circle tool, click to place, drag to move,
-Shift+drag to resize.
+### Buttons and keys
 
-Projects save to the mod's save folder as `projects/<levelId>-<name>.fwl`
-(plain text, with a `.bak` of the previous version). The format is
-locale-independent.
+| Button | Key | Action |
+|---|---|---|
+| CI | F8 | Refresh circle indicators |
+| R | F3 | Record / stop recording |
+| H | F2 | Hitboxes on/off |
+| O | F7 | Circle tool (click to place, drag to size, 1-6 colour, Del removes) |
+| P | F4 | Play / pause the replay |
+| < / > | , / . | Step back / forward one frame (Shift = 10) |
+| + | Insert / I | Add a click at the current frame (while paused) |
+| T | F5 | Test the selected click at its current timing |
+| A | Shift+F6 | Measure every click (Shift+A or F6: only the selected one) |
+| | F9 | Pause / resume |
+| | F10 | Stop |
+| | F1 | Hide / show everything |
+| | [ / ] | Select previous / next input |
+
+While paused (or after clicking the timeline): ←/→ move the selected input
+(Shift = 10 frames, Ctrl = move every later input too), ↑/↓ select, Del
+deletes the click, G sets the goal to the current frame (Shift+G = complete the
+level, Ctrl+G = automatic), M toggles ripple, F fits the whole attempt,
+Home/End jump to the start / last input. Mouse wheel zooms the timeline
+(Shift+wheel scrolls). Ctrl+Z/Ctrl+Y undo/redo, Ctrl+S saves.
+
+The goal decides what "works" means: by default a timing works if the player
+survives 240 frames (1 s) after the click, capped just before where your
+recorded attempt died.
+
+**Click Between Frames** moves clicks between physics frames. Turn it off
+while measuring, or windows can't be reproduced exactly.
 
 ## Building
 
