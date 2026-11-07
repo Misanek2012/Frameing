@@ -63,6 +63,8 @@ private:
                                    cocos2d::CCPoint anchor);
     bool editKeysActive() const;
     void fitAll();
+    void syncCursor(bool restore = false);
+    bool m_cursorForced = false;
 
     void addButton(char const* key, char const* text, char const* bg, cocos2d::ccColor3B textColor,
                    cocos2d::SEL_MenuHandler fn, bool right);

@@ -5,6 +5,7 @@
 #include "../Sounds.hpp"
 
 #include <Geode/binding/ButtonSprite.hpp>
+#include <Geode/binding/GameManager.hpp>
 #include <Geode/binding/PlayerObject.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/CCMouseDispatcher.hpp>
@@ -278,8 +279,34 @@ void Overlay::onEnter() {
     s_instance = this;
 }
 
+// GD hides (and may lock) the cursor while playing. Our freeze doesn't open GD's
+// pause menu, so show it ourselves while the timeline is being used.
+void Overlay::syncCursor(bool restore) {
+    auto& s = Session::get();
+    bool want = !restore && s.overlayVisible && !m_pl->m_isPaused &&
+                (s.paused || s.mode == Mode::Playback || s.mode == Mode::Testing || s.circleTool);
+#ifdef GEODE_IS_WINDOWS
+    auto view = CCEGLView::sharedOpenGLView();
+    if (want) {
+        view->showCursor(true); // every frame: GD re-hides it e.g. after its pause menu
+        if (!m_cursorForced) view->toggleLockCursor(false);
+        m_cursorForced = true;
+    } else if (m_cursorForced) {
+        m_cursorForced = false;
+        if (!m_pl->m_isPaused) { // GD's pause menu manages the cursor itself
+            auto gm = GameManager::get();
+            view->showCursor(gm->getGameVariable("0024"));   // "Show cursor in-game"
+            view->toggleLockCursor(gm->getGameVariable("0128")); // "Lock cursor in-game"
+        }
+    }
+#else
+    (void)want;
+#endif
+}
+
 void Overlay::onExit() {
     if (s_instance == this) s_instance = nullptr;
+    syncCursor(true);
     Session::get().detach(m_pl); // no-op if onQuit already detached
     CCLayer::onExit();
 }
@@ -382,6 +409,7 @@ void Overlay::update(float) {
     auto& s = Session::get();
     setVisible(s.overlayVisible);
     m_level->setVisible(s.overlayVisible);
+    syncCursor();
     if (!s.overlayVisible) return;
     layout();
     if (!m_fitted && !s.project.sequence.empty()) {
