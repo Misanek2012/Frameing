@@ -774,6 +774,20 @@ bool Overlay::onKey(enumKeyCodes key, bool repeat, bool shift, bool ctrl, bool a
     }
     if (!s.overlayVisible) return false;
 
+    // Esc freezes the game with the timeline usable (GD's pause menu would cover
+    // it). Shift+Esc or GD's on-screen pause button still open GD's menu.
+    if (key == KEY_Escape && cfg::flag("esc-pauses")) {
+        if (shift || s.mode == Mode::Testing) {
+            m_focus = false;
+            return false;
+        }
+        if (!repeat) {
+            s.togglePause();
+            if (s.paused) s.setStatus("Paused. Esc resumes, '.' / ',' step, Shift+Esc opens the GD pause menu.");
+        }
+        return true;
+    }
+
     switch (key) {
         case KEY_F2: if (!repeat) s.hitboxes = !s.hitboxes; return true;
         case KEY_F3: if (!repeat) { s.toggleRecording(); m_userView = false; } return true;

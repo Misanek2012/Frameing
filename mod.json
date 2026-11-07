@@ -23,6 +23,12 @@
             "name": "Show overlay on level start",
             "default": true
         },
+        "esc-pauses": {
+            "type": "bool",
+            "name": "Esc freezes the game (timeline stays usable)",
+            "description": "Shift+Esc or GD's on-screen pause button open GD's pause menu.",
+            "default": true
+        },
         "lock-ticks-recording": {
             "type": "bool",
             "name": "Lock 1 physics tick per update while recording",
