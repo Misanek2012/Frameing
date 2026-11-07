@@ -47,7 +47,7 @@ Hover a box for `45: + Jump P1 @ 1637`. Top left shows `Frame: N, Input: M`.
 1. Open a level and click the **R** button (or press **F3**; the R key is GD's restart). Play until you die; the attempt is
    recorded frame-exactly. In practice mode, dying respawns at the checkpoint
    and recording continues from there.
-2. Press **A** to measure the frame window of every click. Each click gets a
+2. Press **A** (or click the A button) to measure the frame window of every click. Each click gets a
    circle indicator in the level: a target at the spot where you clicked with
    the window size next to it (`4` = four frames work). The number also shows
    above the box on the timeline. **CI** (or F8) refreshes the indicators.
@@ -64,16 +64,16 @@ where each input fires.
 
 | Button | Key | Action |
 |---|---|---|
-| CI | F8 | Refresh circle indicators |
-| R | F3 | Record / stop recording |
-| H | F2 | Hitboxes on/off |
-| O | F7 | Circle tool (click to place, drag to size, 1-6 colour, Del removes) |
-| P | F4 | Play / pause the replay |
+| CI | C or F8 | Refresh circle indicators |
+| R | F3 | Record / stop recording (the R key stays GD's restart) |
+| H | H or F2 | Hitboxes on/off |
+| O | O or F7 | Circle tool (click to place, drag to size, 1-6 colour, Del removes) |
+| P | P or F4 | Play / pause the replay |
 | < / > | , / . | Step back / forward one frame (Shift = 10) |
 | + | Insert / I | Add a click at the current frame (while paused) |
-| T | F5 | Test the selected click at its current timing |
-| A | Shift+F6 | Measure every click (Shift+A or F6: only the selected one) |
-| | F9 | Pause / resume |
+| T | T or F5 | Test the selected click at its current timing |
+| A | A or Shift+F6 | Measure every click (Shift+A or F6: only the selected one) |
+| | Esc or F9 | Freeze / resume with the timeline usable (Shift+Esc = GD pause menu) |
 | | F10 | Stop |
 | | F1 | Hide / show everything |
 | | [ / ] | Select previous / next input |
@@ -89,8 +89,9 @@ The goal decides what "works" means: by default a timing works if the player
 survives 240 frames (1 s) after the click, capped just before where your
 recorded attempt died.
 
-**Click Between Frames** moves clicks between physics frames. Turn it off
-while measuring, or windows can't be reproduced exactly.
+**Click Between Frames** moves clicks between physics frames. Keep its
+"Disable CBF" setting on while measuring, or windows can't be reproduced exactly.
+In platformer levels the letter keys only work while frozen (A/D move the player).
 
 ## Building
 

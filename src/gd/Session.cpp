@@ -135,7 +135,8 @@ void Session::attach(PlayLayer* pl) {
     diag.phaseCalibrated = Mod::get()->getSavedValue<bool>("inject-phase-calibrated", false);
 
     conflictWarning.clear();
-    if (Loader::get()->isModLoaded("syzzi.click_between_frames"))
+    if (auto cbf = Loader::get()->getLoadedMod("syzzi.click_between_frames");
+        cbf && !cbf->getSettingValue<bool>("soft-toggle"))
         conflictWarning = "Click Between Frames is enabled: it moves clicks between physics ticks, so recordings "
                           "may not replay exactly. Disable it while measuring.";
 

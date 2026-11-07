@@ -851,6 +851,24 @@ bool Overlay::onKey(enumKeyCodes key, bool repeat, bool shift, bool ctrl, bool a
         }
     }
 
+    // letter keys for the buttons (in platformer levels only while paused, since
+    // A/D move the player there). R, Z, X and W stay GD's.
+    if (!ctrl && !repeat && (!m_pl->m_isPlatformer || s.paused)) {
+        switch (key) {
+            case KEY_C: s.refreshIndicators(); return true;
+            case KEY_H: s.hitboxes = !s.hitboxes; return true;
+            case KEY_O: onCircleTool(nullptr); return true;
+            case KEY_P: onPlay(nullptr); return true;
+            case KEY_T: s.testSelected(); return true;
+            case KEY_A:
+                if (s.mode == Mode::Testing) s.stopAll("stopped");
+                else if (shift) s.sweepSelected();
+                else s.analyzeAll();
+                return true;
+            default: break;
+        }
+    }
+
     // editing keys: while paused (F9 / '.') or after clicking the timeline,
     // so they never steal arrow-key / space jumps during normal play
     if (!editKeysActive()) return false;
