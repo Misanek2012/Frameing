@@ -27,7 +27,7 @@ class $modify(FWLBaseGameLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& s = Session::get();
         bool mine = s.isLayer(this);
-        if (mine) s.onBeforeStep();
+        if (mine) s.onBeforeStep(dt, isHalfTick, isLastTick);
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         if (mine) s.onAfterStep();
     }
@@ -35,6 +35,7 @@ class $modify(FWLBaseGameLayer, GJBaseGameLayer) {
     // Locked mode: run N single-tick updates per rendered frame.
     void update(float dt) {
         auto& s = Session::get();
+        if (s.isLayer(this)) s.onUpdateCall(dt);
         if (!s.isLayer(this) || !s.controlsTicks()) return GJBaseGameLayer::update(dt);
         int n = s.ticksForFrame(dt);
         bool fast = s.fastRun();

@@ -312,8 +312,35 @@ int Session::ticksForFrame(float dt) {
 
 // ---------------------------------------------------------------- per step
 
-void Session::onBeforeStep() {
+void Session::onUpdateCall(float) {
     if (!m_layer) return;
+    auto now = std::chrono::steady_clock::now();
+    auto& p = m_probe;
+    if (p.start == std::chrono::steady_clock::time_point{}) {
+        p = {};
+        p.start = now;
+        p.progress0 = tick();
+        p.levelTime0 = m_layer->m_gameState.m_levelTime;
+    }
+    ++p.updates;
+    double wall = std::chrono::duration<double>(now - p.start).count();
+    if (wall >= 2.0) {
+        if (p.commands > 0 && cfg::flag("timing-log"))
+            log::info("timing: wall {:.2f}s, levelTime +{:.3f}s, progress +{}, processCommands {} (halfTick {}, "
+                      "lastTick {}), step dt sum {:.4f}, update calls {}, mode {}, locked {}, timewarp {:.3f}",
+                      wall, m_layer->m_gameState.m_levelTime - p.levelTime0, tick() - p.progress0, p.commands,
+                      p.halfTicks, p.lastTicks, p.stepDtSum, p.updates, static_cast<int>(mode), controlsTicks(),
+                      m_layer->m_gameState.m_timeWarp);
+        p.start = {};
+    }
+}
+
+void Session::onBeforeStep(float dt, bool halfTick, bool lastTick) {
+    if (!m_layer) return;
+    ++m_probe.commands;
+    if (halfTick) ++m_probe.halfTicks;
+    if (lastTick) ++m_probe.lastTicks;
+    m_probe.stepDtSum += dt;
     ++diag.steps;
     Tick t = tick();
     if (m_prevStepTick >= 0 && t != m_prevStepTick + 1) ++diag.tickJumps;

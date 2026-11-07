@@ -39,7 +39,8 @@ public:
     bool isLayer(GJBaseGameLayer const* l) const; // true if `l` is the attached PlayLayer
 
     void onReset();                       // after PlayLayer::resetLevel
-    void onBeforeStep();                  // start of processCommands
+    void onBeforeStep(float dt, bool halfTick, bool lastTick); // start of processCommands
+    void onUpdateCall(float dt);          // every GJBaseGameLayer::update (diagnostics)
     void onAfterStep();                   // end of processCommands
     bool passLiveButton(bool down, int button, bool isPlayer1); // false = swallow
     bool onDeath(PlayerObject* player, GameObject* object);   // true = suppress original
@@ -231,6 +232,12 @@ private:
     std::optional<std::uint64_t> m_baselineVerifiedFor;
 
     PlayLayer* m_layer = nullptr;
+    struct TimingProbe {
+        std::chrono::steady_clock::time_point start{};
+        std::int64_t updates = 0, commands = 0, halfTicks = 0, lastTicks = 0;
+        Tick progress0 = 0;
+        double levelTime0 = 0, stepDtSum = 0;
+    } m_probe;
     double m_accum = 0;
     int m_pendingSteps = 0;
     Tick m_prevStepTick = -1;

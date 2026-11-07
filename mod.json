@@ -500,6 +500,12 @@
             "default": 5,
             "min": 0,
             "max": 6
+        },
+        "timing-log": {
+            "type": "bool",
+            "name": "Log physics timing (diagnostics)",
+            "description": "Writes physics step counts to the Geode log every 2 seconds.",
+            "default": true
         }
     }
 }
