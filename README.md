@@ -44,7 +44,7 @@ frames, yellow labelled ticks every 60, green boxes = presses, red = releases
 (numbered underneath), cyan bar = current frame, blue bar = "Reset @" point.
 Hover a box for `45: + Jump P1 @ 1637`. Top left shows `Frame: N, Input: M`.
 
-1. Open a level and press **R** (or F3). Play until you die; the attempt is
+1. Open a level and click the **R** button (or press **F3**; the R key is GD's restart). Play until you die; the attempt is
    recorded frame-exactly. In practice mode, dying respawns at the checkpoint
    and recording continues from there.
 2. Press **A** to measure the frame window of every click. Each click gets a
